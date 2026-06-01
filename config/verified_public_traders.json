@@ -1,0 +1,46 @@
+[
+  {
+    "wallet": "0x93ABBC022ce98d6F45D4444b594791CC4B7a9723",
+    "username": "gatorr",
+    "source": "curated_public_web_x",
+    "rationale": "Repeatedly recommended on X as a high-signal Polymarket copy target, with a public Polymarket and FrenFlow profile.",
+    "source_links": [
+      "https://x.com/adiix_official/status/2039648516734132339",
+      "https://polymarket.com/profile/@gatorr",
+      "https://www.frenflow.com/traders/@gatorr"
+    ]
+  },
+  {
+    "wallet": "0xc2e7800b5Af46e6093872b177b7a5e7f0563be51",
+    "username": "beachboy4",
+    "source": "curated_public_web_x",
+    "rationale": "Public sports-heavy trader with a visible Polymarket/FrenFlow footprint and repeated mentions in public Polymarket copy-trading threads.",
+    "source_links": [
+      "https://x.com/LunarResearch_/status/2035136163535853618",
+      "https://polymarket.com/profile/@beachboy4",
+      "https://www.frenflow.com/traders/@beachboy4"
+    ]
+  },
+  {
+    "wallet": "0x37c1874A60d348903594A96703E0507c518fC53a",
+    "username": "CemeterySun",
+    "source": "curated_public_web_x",
+    "rationale": "Public high-volume trader surfaced in category-based copy-trading recommendations and visible on the Polymarket leaderboard.",
+    "source_links": [
+      "https://x.com/LunarResearch_/status/2035136163535853618",
+      "https://polymarket.com/profile/@CemeterySun",
+      "https://www.frenflow.com/traders/@CemeterySun"
+    ]
+  },
+  {
+    "wallet": "0x2005D16a84CEEfa912D4e380cD32E7ff827875Ea",
+    "username": "RN1",
+    "source": "curated_public_web_x",
+    "rationale": "Publicly profiled sports trader with a visible Polymarket profile and third-party coverage of large realized profits.",
+    "source_links": [
+      "https://x.com/beachboy4s/status/1900972833414762790",
+      "https://polymarket.com/profile/@RN1",
+      "https://www.sportscasting.com/news/college-student-doubles-80k-predicting-college-football-on-polymarket/"
+    ]
+  }
+]
