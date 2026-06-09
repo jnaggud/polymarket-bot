@@ -3,8 +3,10 @@ name = "polymarket-bot"
 version = "0.1.0"
 description = "Paper-first Polymarket bot scaffold with scanning, thesis generation, consensus, and exit monitoring."
 requires-python = ">=3.10"
+dependencies = [
+    "py-clob-client-v2>=0.1.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
-

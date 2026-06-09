@@ -8,6 +8,7 @@ from bot.core import PolymarketCLI
 
 from ..config import LatencyBotSettings
 from ..storage import connect_latency_bot_db, record_live_complete_set_arb_pilot_attempt
+from .polymarket_live_client import PolymarketLiveCompleteSetClient
 
 
 CONFIRM_LIVE_COMPLETE_SET_ARB_PILOT = "LIVE_COMPLETE_SET_ARB_PILOT"
@@ -273,7 +274,84 @@ def run_live_complete_set_arb_pilot_cycle(
             attempted += 1
             continue
         if settings.live_complete_set_arb_pilot_require_fok:
-            block("FOK paired live executor not implemented for current CLI wrapper")
+            live_client = PolymarketLiveCompleteSetClient(settings)
+            preflight = live_client.preflight()
+            if not preflight.ok:
+                block(f"live CLOB preflight failed: {preflight.reason}")
+                attempted += 1
+                continue
+            yes_amount = round(notional * (yes_price / total_cost), 6)
+            no_amount = round(notional * (no_price / total_cost), 6)
+            try:
+                paired_payload = live_client.post_paired_fok_market_buys(
+                    yes_token_id=yes_token_id,
+                    no_token_id=no_token_id,
+                    yes_worst_price=yes_price,
+                    no_worst_price=no_price,
+                    yes_amount_usdc=yes_amount,
+                    no_amount_usdc=no_amount,
+                )
+            except Exception as exc:
+                failed = _record_attempt(
+                    settings,
+                    ts=ts,
+                    signal=signal,
+                    market=market,
+                    mode=mode,
+                    decision="FAILED",
+                    reason="paired FOK batch submit failed",
+                    adjusted_edge=adjusted_edge,
+                    effective_depth_usdc=effective_depth,
+                    notional_usdc=notional,
+                    size=size,
+                    expected_pnl_usdc=expected_pnl,
+                    realized_pnl_usdc=0.0,
+                    error=str(exc),
+                )
+                failures.append(failed)
+                attempted += 1
+                continue
+            if not bool(paired_payload.get("success")):
+                failed = _record_attempt(
+                    settings,
+                    ts=ts,
+                    signal=signal,
+                    market=market,
+                    mode=mode,
+                    decision="FAILED",
+                    reason="paired FOK batch returned unsuccessful response",
+                    adjusted_edge=adjusted_edge,
+                    effective_depth_usdc=effective_depth,
+                    notional_usdc=notional,
+                    size=size,
+                    expected_pnl_usdc=expected_pnl,
+                    realized_pnl_usdc=0.0,
+                    yes_payload=paired_payload.get("yes_order"),
+                    no_payload=paired_payload.get("no_order"),
+                    error=_json_payload(paired_payload.get("response")),
+                )
+                failures.append(failed)
+                attempted += 1
+                continue
+            opened.append(
+                _record_attempt(
+                    settings,
+                    ts=ts,
+                    signal=signal,
+                    market=market,
+                    mode=mode,
+                    decision="SUBMITTED",
+                    reason="paired FOK batch submitted through official CLOB client",
+                    adjusted_edge=adjusted_edge,
+                    effective_depth_usdc=effective_depth,
+                    notional_usdc=notional,
+                    size=size,
+                    expected_pnl_usdc=expected_pnl,
+                    yes_payload=paired_payload.get("yes_order"),
+                    no_payload=paired_payload.get("no_order"),
+                    error=_json_payload(paired_payload.get("response")),
+                )
+            )
             attempted += 1
             continue
         if not settings.live_complete_set_arb_pilot_allow_sequential_orders:
@@ -363,6 +441,6 @@ def run_live_complete_set_arb_pilot_cycle(
         "failures": failures,
         "notes": [
             "Live complete-set arb pilot is isolated from paper/live-paper strategy metrics.",
-            "Real order submission requires explicit live mode, confirmation string, and non-FOK sequential override.",
+            "Real order submission requires explicit live mode, confirmation string, official CLOB credentials, and paired FOK batch support.",
         ],
     }

@@ -2286,11 +2286,21 @@ def latency_bot_live_complete_set_arb_pilot_stats(settings: LatencyBotSettings) 
         and mode == "live"
         and str(settings.live_complete_set_arb_pilot_confirm) == "LIVE_COMPLETE_SET_ARB_PILOT"
     )
+    credentials_configured = all(
+        (
+            settings.live_complete_set_arb_pilot_private_key,
+            settings.live_complete_set_arb_pilot_api_key,
+            settings.live_complete_set_arb_pilot_api_secret,
+            settings.live_complete_set_arb_pilot_api_passphrase,
+            settings.live_complete_set_arb_pilot_funder_address,
+        )
+    )
     summary = {
         "mode": "Guarded live complete-set arb pilot",
         "enabled": bool(settings.live_complete_set_arb_pilot_enabled),
         "pilot_mode": mode,
         "armed_for_live_orders": armed,
+        "credentials_configured": bool(credentials_configured),
         "confirmation_required": "LIVE_COMPLETE_SET_ARB_PILOT",
         "simulated_or_live_capital_usdc": round(float(settings.live_complete_set_arb_pilot_capital_usdc), 6),
         "target_notional_usdc": round(float(settings.live_complete_set_arb_pilot_notional_usdc), 6),
@@ -2320,6 +2330,8 @@ def latency_bot_live_complete_set_arb_pilot_stats(settings: LatencyBotSettings) 
         "daily_loss_limit_usdc": round(float(settings.live_complete_set_arb_pilot_daily_loss_limit_usdc), 6),
         "allow_sequential_orders": bool(settings.live_complete_set_arb_pilot_allow_sequential_orders),
         "require_fok": bool(settings.live_complete_set_arb_pilot_require_fok),
+        "signature_type": int(settings.live_complete_set_arb_pilot_signature_type),
+        "host": str(settings.live_complete_set_arb_pilot_host),
         "same_market_cooldown_seconds": int(settings.live_complete_set_arb_pilot_same_market_cooldown_seconds),
     }
     return {
