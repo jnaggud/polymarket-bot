@@ -157,6 +157,21 @@ class LatencyBotSettings:
     complete_set_arb_max_sets_per_cycle: int
     complete_set_arb_same_market_cooldown_seconds: int
     complete_set_arb_execution_policy: str
+    live_complete_set_arb_pilot_enabled: bool
+    live_complete_set_arb_pilot_mode: str
+    live_complete_set_arb_pilot_confirm: str
+    live_complete_set_arb_pilot_capital_usdc: float
+    live_complete_set_arb_pilot_notional_usdc: float
+    live_complete_set_arb_pilot_min_edge_per_share: float
+    live_complete_set_arb_pilot_min_depth_usdc: float
+    live_complete_set_arb_pilot_depth_haircut: float
+    live_complete_set_arb_pilot_extra_slippage_per_share: float
+    live_complete_set_arb_pilot_max_sets_per_cycle: int
+    live_complete_set_arb_pilot_max_open_sets: int
+    live_complete_set_arb_pilot_daily_loss_limit_usdc: float
+    live_complete_set_arb_pilot_allow_sequential_orders: bool
+    live_complete_set_arb_pilot_require_fok: bool
+    live_complete_set_arb_pilot_same_market_cooldown_seconds: int
     shadow_variant_top_raw_pnl_count: int
     shadow_variant_dashboard_grid_limit: int
     shadow_variant_dashboard_reason_limit: int
@@ -348,6 +363,21 @@ class LatencyBotSettings:
             complete_set_arb_max_sets_per_cycle=_env_int("LATENCY_BOT_COMPLETE_SET_ARB_MAX_SETS_PER_CYCLE", 3),
             complete_set_arb_same_market_cooldown_seconds=_env_int("LATENCY_BOT_COMPLETE_SET_ARB_SAME_MARKET_COOLDOWN_SECONDS", 300),
             complete_set_arb_execution_policy=os.getenv("LATENCY_BOT_COMPLETE_SET_ARB_EXECUTION_POLICY", "paired_fok_batch"),
+            live_complete_set_arb_pilot_enabled=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
+            live_complete_set_arb_pilot_mode=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MODE", "dry_run").strip().lower(),
+            live_complete_set_arb_pilot_confirm=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CONFIRM", ""),
+            live_complete_set_arb_pilot_capital_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CAPITAL_USDC", 50.0),
+            live_complete_set_arb_pilot_notional_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_NOTIONAL_USDC", 5.0),
+            live_complete_set_arb_pilot_min_edge_per_share=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_EDGE_PER_SHARE", 0.0100),
+            live_complete_set_arb_pilot_min_depth_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_DEPTH_USDC", 10.0),
+            live_complete_set_arb_pilot_depth_haircut=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_DEPTH_HAIRCUT", 0.50),
+            live_complete_set_arb_pilot_extra_slippage_per_share=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_EXTRA_SLIPPAGE_PER_SHARE", 0.0030),
+            live_complete_set_arb_pilot_max_sets_per_cycle=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MAX_SETS_PER_CYCLE", 1),
+            live_complete_set_arb_pilot_max_open_sets=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MAX_OPEN_SETS", 1),
+            live_complete_set_arb_pilot_daily_loss_limit_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_DAILY_LOSS_LIMIT_USDC", 5.0),
+            live_complete_set_arb_pilot_allow_sequential_orders=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ALLOW_SEQUENTIAL_ORDERS", "0").strip().lower() in {"1", "true", "yes", "on"},
+            live_complete_set_arb_pilot_require_fok=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_REQUIRE_FOK", "1").strip().lower() in {"1", "true", "yes", "on"},
+            live_complete_set_arb_pilot_same_market_cooldown_seconds=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_SAME_MARKET_COOLDOWN_SECONDS", 300),
             realistic_complete_set_arb_enabled=os.getenv("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             realistic_complete_set_arb_capital_usdc=_env_float("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_CAPITAL_USDC", 3000.0),
             realistic_complete_set_arb_lookback_hours=_env_int("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_LOOKBACK_HOURS", 24),

@@ -19,6 +19,7 @@ from .storage import (
     latency_bot_complete_set_arb_stats,
     latency_bot_kalshi_arb_sim,
     latency_bot_live_strategy_equity_curves,
+    latency_bot_live_complete_set_arb_pilot_stats,
     latency_bot_opportunity_stats,
     latency_bot_performance_stats,
     latency_bot_polymarket_us_arb_sim,
@@ -494,6 +495,7 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings) -> dict[str,
     realistic_complete_set_arb_all_time = latency_bot_realistic_complete_set_arb_sim(
         replace(settings, realistic_complete_set_arb_lookback_hours=24 * 365 * 20)
     )
+    live_complete_set_arb_pilot = latency_bot_live_complete_set_arb_pilot_stats(settings)
     polymarket_us_arb = latency_bot_polymarket_us_arb_sim(settings)
     kalshi_arb = latency_bot_kalshi_arb_sim(settings)
     capital_usage = latency_bot_capital_usage(settings)
@@ -530,6 +532,7 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings) -> dict[str,
         "complete_set_arb_stats": complete_set_arb_stats,
         "realistic_complete_set_arb": realistic_complete_set_arb,
         "realistic_complete_set_arb_all_time": realistic_complete_set_arb_all_time,
+        "live_complete_set_arb_pilot": live_complete_set_arb_pilot,
         "polymarket_us_arb": polymarket_us_arb,
         "kalshi_arb": kalshi_arb,
         "capital_usage": capital_usage,
@@ -642,6 +645,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Shadow Variant Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_variant_signals", 0)))],
         ["Complete-Set Arb Signals (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_signals", 0)))],
         ["Complete-Set Arb Closes (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_closes", 0)))],
+        ["Live Arb Pilot Attempts (60m)", html.escape(_fmt_num(recent_counts.get("live_complete_set_arb_pilot_attempts", 0)))],
         ["Polymarket US Arb Ticks (60m)", html.escape(_fmt_num(recent_counts.get("polymarket_us_arb_ticks", 0)))],
         ["Kalshi Arb Ticks (60m)", html.escape(_fmt_num(recent_counts.get("kalshi_arb_ticks", 0)))],
         ["Missed Opportunities (60m)", html.escape(_fmt_num(recent_counts.get("missed_opportunities", 0)))],
@@ -1012,6 +1016,83 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 html.escape(f"{float(item.get('max_adjusted_edge', 0.0)):.4f}"),
             ]
             for item in realistic_complete_set_arb.get("reason_breakdown", [])
+        ],
+    )
+    live_complete_set_arb_pilot = state.get("live_complete_set_arb_pilot", {}) if isinstance(state.get("live_complete_set_arb_pilot"), dict) else {}
+    live_complete_set_pilot_summary = (
+        live_complete_set_arb_pilot.get("summary", {})
+        if isinstance(live_complete_set_arb_pilot.get("summary"), dict)
+        else {}
+    )
+    live_complete_set_pilot_summary_rows = [
+        ["Mode", html.escape(str(live_complete_set_pilot_summary.get("mode", "Guarded live complete-set arb pilot")))],
+        ["Enabled", html.escape(str(bool(live_complete_set_pilot_summary.get("enabled"))).lower())],
+        ["Pilot Mode", html.escape(str(live_complete_set_pilot_summary.get("pilot_mode", "dry_run")))],
+        ["Armed For Live Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("armed_for_live_orders"))).lower())],
+        ["Confirmation Required", html.escape(str(live_complete_set_pilot_summary.get("confirmation_required", "")))],
+        ["Pilot Capital", html.escape(_fmt_money(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", 0.0)))],
+        ["Target Notional / Set", html.escape(_fmt_money(live_complete_set_pilot_summary.get("target_notional_usdc", 0.0)))],
+        ["Submitted Sets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("submitted_sets", 0)))],
+        ["Dry-Run Candidates", html.escape(_fmt_num(live_complete_set_pilot_summary.get("dry_run_candidates", 0)))],
+        ["Blocked Attempts", html.escape(_fmt_num(live_complete_set_pilot_summary.get("blocked_attempts", 0)))],
+        ["Failed Attempts", html.escape(_fmt_num(live_complete_set_pilot_summary.get("failed_attempts", 0)))],
+        ["Unique Markets Submitted", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unique_markets_submitted", 0)))],
+        ["Expected Locked PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("expected_locked_pnl_usdc", 0.0)))],
+        ["Dry-Run Candidate PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("dry_run_candidate_pnl_usdc", 0.0)))],
+        ["Net PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("net_pnl", 0.0)))],
+        ["24h Net Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["24h Candidate PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("expected_candidate_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(live_complete_set_pilot_summary.get("max_drawdown", 0.0)))],
+        ["Attempts 60m", html.escape(_fmt_num(live_complete_set_pilot_summary.get("attempts_60m", 0)))],
+        ["Eligible 60m", html.escape(_fmt_num(live_complete_set_pilot_summary.get("eligible_60m", 0)))],
+        ["Eligible Rate 60m", html.escape(f"{100.0 * float(live_complete_set_pilot_summary.get('eligible_rate_60m', 0.0)):.1f}%")],
+        ["Best Adjusted Edge 60m", html.escape(f"{float(live_complete_set_pilot_summary.get('best_adjusted_edge_60m', 0.0)):.4f}")],
+        ["Min Edge / Share", html.escape(f"{float(live_complete_set_pilot_summary.get('min_edge_per_share', 0.0)):.4f}")],
+        ["Min Depth", html.escape(_fmt_money(live_complete_set_pilot_summary.get("min_depth_usdc", 0.0)))],
+        ["Depth Haircut", html.escape(f"{100.0 * float(live_complete_set_pilot_summary.get('depth_haircut', 0.0)):.1f}%")],
+        ["Extra Slippage / Share", html.escape(f"{float(live_complete_set_pilot_summary.get('extra_slippage_per_share', 0.0)):.4f}")],
+        ["Max Sets / Cycle", html.escape(_fmt_num(live_complete_set_pilot_summary.get("max_sets_per_cycle", 0)))],
+        ["Max Open Sets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("max_open_sets", 0)))],
+        ["Daily Loss Limit", html.escape(_fmt_money(live_complete_set_pilot_summary.get("daily_loss_limit_usdc", 0.0)))],
+        ["Allow Sequential Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("allow_sequential_orders"))).lower())],
+        ["Require FOK", html.escape(str(bool(live_complete_set_pilot_summary.get("require_fok"))).lower())],
+        ["Same-Market Cooldown", html.escape(f"{_fmt_num(live_complete_set_pilot_summary.get('same_market_cooldown_seconds', 0))}s")],
+    ]
+    live_complete_set_pilot_attempt_table = _table(
+        ["Time (CT)", "Market", "Asset", "Decision", "Reason", "YES", "NO", "Cost", "Adj Edge", "Depth", "Effective Depth", "Notional", "Expected PnL", "Realized PnL", "Error"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("decision", ""))),
+                html.escape(str(item.get("reason", ""))),
+                html.escape(f"{float(item.get('yes_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('no_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('total_cost') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('adjusted_edge') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("executable_depth_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("effective_depth_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("expected_pnl_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("realized_pnl_usdc", 0.0))),
+                html.escape(str(item.get("error", ""))[:160]),
+            ]
+            for item in live_complete_set_arb_pilot.get("recent_attempts", [])
+        ],
+    )
+    live_complete_set_pilot_reason_table = _table(
+        ["Decision", "Reason", "Count", "Max Adjusted Edge"],
+        [
+            [
+                html.escape(str(item.get("decision", ""))),
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_adjusted_edge') or 0.0):.4f}"),
+            ]
+            for item in live_complete_set_arb_pilot.get("reason_breakdown", [])
         ],
     )
     polymarket_us_arb_summary = (
@@ -1710,6 +1791,17 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {realistic_complete_set_event_table}
     <h3>Realistic Skip / Failure Reasons</h3>
     {realistic_complete_set_reason_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>Live Complete-Set Arb Pilot</h2>
+    <div class="sub">Separate guarded live-pilot tracker for the $50 Polymarket test bankroll. Dry-run candidates, safety blocks, submitted paired attempts, and failures are isolated from all paper/research bot metrics.</div>
+    {_table(["Metric", "Value"], live_complete_set_pilot_summary_rows)}
+    <h3>Live Pilot PnL Curve</h3>
+    {_render_equity_curve(live_complete_set_arb_pilot.get("equity_curve", []) if isinstance(live_complete_set_arb_pilot.get("equity_curve"), list) else [], float(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Recent Live Pilot Attempts</h3>
+    {live_complete_set_pilot_attempt_table}
+    <h3>Live Pilot Blocks / Failures</h3>
+    {live_complete_set_pilot_reason_table}
   </div>
   <div class="panel" style="margin-top:16px;">
     <h2>Polymarket US Crossed-Book Arb Simulation</h2>

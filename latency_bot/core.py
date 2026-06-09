@@ -16,6 +16,7 @@ from .execution.paper import (
     run_shadow_btc_no_paper_cycle,
     run_shadow_btc_yes_variant_paper_cycle,
 )
+from .execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
 from .feeds.binance import refresh_binance_cache
 from .feeds.discovery import discover_latency_markets
 from .feeds.kalshi import fetch_kalshi_arb_ticks
@@ -418,6 +419,13 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         signals=complete_set_arb_signals,
         ts=_now_iso(),
     )
+    live_complete_set_arb_pilot = run_live_complete_set_arb_pilot_cycle(
+        settings,
+        markets_payload=markets_payload,
+        signals=complete_set_arb_signals,
+        ts=_now_iso(),
+        cli=cli,
+    )
     risk = risk_snapshot(settings)
     polymarket_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
     binance_items = binance_cache.get("items", []) if isinstance(binance_cache.get("items"), list) else []
@@ -466,6 +474,10 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "signals_seen": len(complete_set_arb_signals),
             "execution": complete_set_arb_execution,
         },
+        "live_complete_set_arb_pilot": {
+            "signals_seen": len(complete_set_arb_signals),
+            "execution": live_complete_set_arb_pilot,
+        },
         "risk": risk,
         "notes": [
             "Direct feed adapters active.",
@@ -478,6 +490,7 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "Shadow taker strategy/model variants run in parallel across configured assets, sides, and tenors without affecting live paper execution.",
             "Configured promoted variants execute through live paper positions and feed realized revenue projections.",
             "Complete-set arb prototype scans paired YES/NO asks and paper-locks paired positions when net cost is below $1.",
+            "Live complete-set arb pilot is tracked separately and defaults to dry-run/safety-blocked mode.",
         ],
     }
     record_engine_cycle(

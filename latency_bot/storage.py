@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .config import LatencyBotSettings
 
@@ -371,6 +372,37 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS live_complete_set_arb_pilot_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        tenor_minutes INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        yes_token_id TEXT,
+        no_token_id TEXT,
+        yes_price REAL NOT NULL,
+        no_price REAL NOT NULL,
+        total_cost REAL NOT NULL,
+        gross_edge REAL NOT NULL,
+        net_edge REAL NOT NULL,
+        adjusted_edge REAL NOT NULL,
+        executable_depth_usdc REAL NOT NULL,
+        effective_depth_usdc REAL NOT NULL,
+        notional_usdc REAL NOT NULL,
+        size REAL NOT NULL,
+        expected_pnl_usdc REAL NOT NULL,
+        realized_pnl_usdc REAL NOT NULL,
+        yes_order_id TEXT,
+        no_order_id TEXT,
+        yes_order_payload TEXT,
+        no_order_payload TEXT,
+        error TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS polymarket_us_arb_ticks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT NOT NULL,
@@ -650,14 +682,22 @@ def _backfill_position_entry_features(conn: sqlite3.Connection, table: str, sign
     )
 
 
-def connect_latency_bot_db(settings: LatencyBotSettings) -> sqlite3.Connection:
+@contextmanager
+def connect_latency_bot_db(settings: LatencyBotSettings) -> Iterator[sqlite3.Connection]:
     settings.ensure_dirs()
     conn = sqlite3.connect(settings.db_path, timeout=30.0)
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.row_factory = sqlite3.Row
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _rebuild_equity_snapshots(conn: sqlite3.Connection, settings: LatencyBotSettings) -> None:
@@ -789,6 +829,9 @@ def _ensure_query_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_complete_set_arb_positions_market_ts ON complete_set_arb_positions(market_id, entry_ts)",
         "CREATE INDEX IF NOT EXISTS idx_complete_set_arb_positions_status ON complete_set_arb_positions(status)",
         "CREATE INDEX IF NOT EXISTS idx_complete_set_arb_events_type_ts ON complete_set_arb_events(event_type, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_live_complete_set_arb_pilot_attempts_ts ON live_complete_set_arb_pilot_attempts(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_live_complete_set_arb_pilot_attempts_market_ts ON live_complete_set_arb_pilot_attempts(market_id, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_live_complete_set_arb_pilot_attempts_decision_ts ON live_complete_set_arb_pilot_attempts(decision, ts)",
         "CREATE INDEX IF NOT EXISTS idx_polymarket_us_arb_ticks_ts ON polymarket_us_arb_ticks(ts)",
         "CREATE INDEX IF NOT EXISTS idx_polymarket_us_arb_ticks_symbol_ts ON polymarket_us_arb_ticks(symbol, ts)",
         "CREATE INDEX IF NOT EXISTS idx_kalshi_arb_ticks_ts ON kalshi_arb_ticks(ts)",
@@ -2063,6 +2106,228 @@ def close_complete_set_arb_position(
             (ts, position_id, "close", float(payout_price), float(pnl), reason),
         )
         conn.commit()
+
+
+def record_live_complete_set_arb_pilot_attempt(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    asset: str,
+    tenor_minutes: int,
+    mode: str,
+    decision: str,
+    reason: str,
+    yes_token_id: str = "",
+    no_token_id: str = "",
+    yes_price: float = 0.0,
+    no_price: float = 0.0,
+    total_cost: float = 0.0,
+    gross_edge: float = 0.0,
+    net_edge: float = 0.0,
+    adjusted_edge: float = 0.0,
+    executable_depth_usdc: float = 0.0,
+    effective_depth_usdc: float = 0.0,
+    notional_usdc: float = 0.0,
+    size: float = 0.0,
+    expected_pnl_usdc: float = 0.0,
+    realized_pnl_usdc: float = 0.0,
+    yes_order_id: str = "",
+    no_order_id: str = "",
+    yes_order_payload: str = "",
+    no_order_payload: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    with connect_latency_bot_db(settings) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO live_complete_set_arb_pilot_attempts (
+                ts, market_id, asset, tenor_minutes, mode, decision, reason,
+                yes_token_id, no_token_id, yes_price, no_price, total_cost,
+                gross_edge, net_edge, adjusted_edge, executable_depth_usdc,
+                effective_depth_usdc, notional_usdc, size, expected_pnl_usdc,
+                realized_pnl_usdc, yes_order_id, no_order_id, yes_order_payload,
+                no_order_payload, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                market_id,
+                asset,
+                int(tenor_minutes),
+                mode,
+                decision,
+                reason,
+                yes_token_id,
+                no_token_id,
+                float(yes_price),
+                float(no_price),
+                float(total_cost),
+                float(gross_edge),
+                float(net_edge),
+                float(adjusted_edge),
+                float(executable_depth_usdc),
+                float(effective_depth_usdc),
+                float(notional_usdc),
+                float(size),
+                float(expected_pnl_usdc),
+                float(realized_pnl_usdc),
+                yes_order_id,
+                no_order_id,
+                yes_order_payload,
+                no_order_payload,
+                error,
+            ),
+        )
+        row_id = int(cursor.lastrowid or 0)
+        conn.commit()
+    return {
+        "id": row_id,
+        "ts": ts,
+        "market_id": market_id,
+        "asset": asset,
+        "tenor_minutes": int(tenor_minutes),
+        "mode": mode,
+        "decision": decision,
+        "reason": reason,
+        "yes_price": float(yes_price),
+        "no_price": float(no_price),
+        "total_cost": float(total_cost),
+        "adjusted_edge": float(adjusted_edge),
+        "notional_usdc": float(notional_usdc),
+        "size": float(size),
+        "expected_pnl_usdc": float(expected_pnl_usdc),
+        "realized_pnl_usdc": float(realized_pnl_usdc),
+        "error": error,
+    }
+
+
+def latency_bot_live_complete_set_arb_pilot_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    cutoff_60m = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+    with connect_latency_bot_db(settings) as conn:
+        all_rows = conn.execute(
+            """
+            SELECT *
+            FROM live_complete_set_arb_pilot_attempts
+            ORDER BY ts ASC, id ASC
+            """
+        ).fetchall()
+        recent_rows = conn.execute(
+            """
+            SELECT *
+            FROM live_complete_set_arb_pilot_attempts
+            ORDER BY ts DESC, id DESC
+            LIMIT 30
+            """
+        ).fetchall()
+        reason_rows = conn.execute(
+            """
+            SELECT reason, decision, COUNT(*) AS count, MAX(adjusted_edge) AS max_adjusted_edge
+            FROM live_complete_set_arb_pilot_attempts
+            WHERE ts >= ?
+            GROUP BY reason, decision
+            ORDER BY count DESC, reason ASC, decision ASC
+            LIMIT 40
+            """,
+            (cutoff_24h,),
+        ).fetchall()
+        recent_summary = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS attempts_60m,
+                SUM(CASE WHEN decision IN ('DRY_RUN', 'SUBMITTED') THEN 1 ELSE 0 END) AS eligible_60m,
+                MAX(adjusted_edge) AS best_adjusted_edge_60m
+            FROM live_complete_set_arb_pilot_attempts
+            WHERE ts >= ?
+            """,
+            (cutoff_60m,),
+        ).fetchone()
+    submitted_rows = [row for row in all_rows if str(row["decision"] or "") == "SUBMITTED"]
+    dry_run_rows = [row for row in all_rows if str(row["decision"] or "") == "DRY_RUN"]
+    failed_rows = [row for row in all_rows if str(row["decision"] or "") in {"FAILED", "ONE_LEG_FAILED"}]
+    blocked_rows = [row for row in all_rows if str(row["decision"] or "") == "BLOCKED"]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    curve: list[dict[str, Any]] = []
+    realized_24h = 0.0
+    expected_24h = 0.0
+    markets: set[str] = set()
+    for row in all_rows:
+        decision = str(row["decision"] or "")
+        expected = float(row["expected_pnl_usdc"] or 0.0)
+        realized = float(row["realized_pnl_usdc"] or 0.0)
+        pnl = realized if decision in {"FAILED", "ONE_LEG_FAILED"} else expected if decision == "SUBMITTED" else 0.0
+        if decision == "SUBMITTED":
+            markets.add(str(row["market_id"] or ""))
+        running = round(running + pnl, 6)
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+        parsed_ts = _storage_parse_ts(str(row["ts"] or ""))
+        if parsed_ts is not None and parsed_ts >= _storage_parse_ts(cutoff_24h):
+            realized_24h = round(realized_24h + pnl, 6)
+            if decision in {"DRY_RUN", "SUBMITTED"}:
+                expected_24h = round(expected_24h + expected, 6)
+        if decision in {"SUBMITTED", "FAILED", "ONE_LEG_FAILED"}:
+            curve.append(
+                {
+                    "ts": str(row["ts"] or ""),
+                    "realized_pnl_usdc": running,
+                    "unrealized_pnl_usdc": 0.0,
+                    "equity_usdc": round(float(settings.live_complete_set_arb_pilot_capital_usdc) + running, 6),
+                }
+            )
+    attempts_60m = int(recent_summary["attempts_60m"] or 0) if recent_summary else 0
+    eligible_60m = int(recent_summary["eligible_60m"] or 0) if recent_summary else 0
+    mode = str(settings.live_complete_set_arb_pilot_mode or "dry_run").lower()
+    armed = (
+        bool(settings.live_complete_set_arb_pilot_enabled)
+        and mode == "live"
+        and str(settings.live_complete_set_arb_pilot_confirm) == "LIVE_COMPLETE_SET_ARB_PILOT"
+    )
+    summary = {
+        "mode": "Guarded live complete-set arb pilot",
+        "enabled": bool(settings.live_complete_set_arb_pilot_enabled),
+        "pilot_mode": mode,
+        "armed_for_live_orders": armed,
+        "confirmation_required": "LIVE_COMPLETE_SET_ARB_PILOT",
+        "simulated_or_live_capital_usdc": round(float(settings.live_complete_set_arb_pilot_capital_usdc), 6),
+        "target_notional_usdc": round(float(settings.live_complete_set_arb_pilot_notional_usdc), 6),
+        "submitted_sets": len(submitted_rows),
+        "dry_run_candidates": len(dry_run_rows),
+        "blocked_attempts": len(blocked_rows),
+        "failed_attempts": len(failed_rows),
+        "unique_markets_submitted": len(markets),
+        "expected_locked_pnl_usdc": round(sum(float(row["expected_pnl_usdc"] or 0.0) for row in submitted_rows), 6),
+        "dry_run_candidate_pnl_usdc": round(sum(float(row["expected_pnl_usdc"] or 0.0) for row in dry_run_rows), 6),
+        "net_pnl": round(running, 6),
+        "realized_pnl_24h_usdc": round(realized_24h, 6),
+        "expected_candidate_pnl_24h_usdc": round(expected_24h, 6),
+        "projected_monthly_revenue_usdc": round(realized_24h * 30.0, 6),
+        "projected_yearly_revenue_usdc": round(realized_24h * 365.0, 6),
+        "max_drawdown": round(max_drawdown, 6),
+        "attempts_60m": attempts_60m,
+        "eligible_60m": eligible_60m,
+        "eligible_rate_60m": round(eligible_60m / attempts_60m, 6) if attempts_60m else 0.0,
+        "best_adjusted_edge_60m": round(float(recent_summary["best_adjusted_edge_60m"] or 0.0), 6) if recent_summary else 0.0,
+        "min_edge_per_share": round(float(settings.live_complete_set_arb_pilot_min_edge_per_share), 6),
+        "min_depth_usdc": round(float(settings.live_complete_set_arb_pilot_min_depth_usdc), 6),
+        "depth_haircut": round(float(settings.live_complete_set_arb_pilot_depth_haircut), 6),
+        "extra_slippage_per_share": round(float(settings.live_complete_set_arb_pilot_extra_slippage_per_share), 6),
+        "max_sets_per_cycle": int(settings.live_complete_set_arb_pilot_max_sets_per_cycle),
+        "max_open_sets": int(settings.live_complete_set_arb_pilot_max_open_sets),
+        "daily_loss_limit_usdc": round(float(settings.live_complete_set_arb_pilot_daily_loss_limit_usdc), 6),
+        "allow_sequential_orders": bool(settings.live_complete_set_arb_pilot_allow_sequential_orders),
+        "require_fok": bool(settings.live_complete_set_arb_pilot_require_fok),
+        "same_market_cooldown_seconds": int(settings.live_complete_set_arb_pilot_same_market_cooldown_seconds),
+    }
+    return {
+        "summary": summary,
+        "recent_attempts": [dict(row) for row in recent_rows],
+        "reason_breakdown": [dict(row) for row in reason_rows],
+        "equity_curve": curve[-200:],
+    }
 
 
 def latest_rows(settings: LatencyBotSettings, table: str, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -4380,6 +4645,7 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "shadow_variant_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM shadow_variant_positions").fetchone()["count"]),
             "complete_set_arb_signals_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_signals").fetchone()["count"]),
             "complete_set_arb_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_positions").fetchone()["count"]),
+            "live_complete_set_arb_pilot_attempts_total": int(conn.execute("SELECT COUNT(*) AS count FROM live_complete_set_arb_pilot_attempts").fetchone()["count"]),
             "polymarket_us_arb_ticks_total": int(conn.execute("SELECT COUNT(*) AS count FROM polymarket_us_arb_ticks").fetchone()["count"]),
             "kalshi_arb_ticks_total": int(conn.execute("SELECT COUNT(*) AS count FROM kalshi_arb_ticks").fetchone()["count"]),
         }
@@ -4400,6 +4666,7 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "shadow_variant_signals": count_recent("shadow_variant_signals"),
             "complete_set_arb_signals": count_recent("complete_set_arb_signals"),
             "complete_set_arb_closes": int(complete_set_closes_row["count"]) if complete_set_closes_row else 0,
+            "live_complete_set_arb_pilot_attempts": count_recent("live_complete_set_arb_pilot_attempts"),
             "polymarket_us_arb_ticks": count_recent("polymarket_us_arb_ticks"),
             "kalshi_arb_ticks": count_recent("kalshi_arb_ticks"),
             "fills": count_recent("fills"),
