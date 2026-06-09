@@ -1029,6 +1029,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Enabled", html.escape(str(bool(live_complete_set_pilot_summary.get("enabled"))).lower())],
         ["Pilot Mode", html.escape(str(live_complete_set_pilot_summary.get("pilot_mode", "dry_run")))],
         ["Armed For Live Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("armed_for_live_orders"))).lower())],
+        ["Credentials Configured", html.escape(str(bool(live_complete_set_pilot_summary.get("credentials_configured"))).lower())],
         ["Confirmation Required", html.escape(str(live_complete_set_pilot_summary.get("confirmation_required", "")))],
         ["Pilot Capital", html.escape(_fmt_money(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", 0.0)))],
         ["Target Notional / Set", html.escape(_fmt_money(live_complete_set_pilot_summary.get("target_notional_usdc", 0.0)))],
@@ -1058,6 +1059,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Daily Loss Limit", html.escape(_fmt_money(live_complete_set_pilot_summary.get("daily_loss_limit_usdc", 0.0)))],
         ["Allow Sequential Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("allow_sequential_orders"))).lower())],
         ["Require FOK", html.escape(str(bool(live_complete_set_pilot_summary.get("require_fok"))).lower())],
+        ["Signature Type", html.escape(_fmt_num(live_complete_set_pilot_summary.get("signature_type", 0)))],
+        ["CLOB Host", html.escape(str(live_complete_set_pilot_summary.get("host", "")))],
         ["Same-Market Cooldown", html.escape(f"{_fmt_num(live_complete_set_pilot_summary.get('same_market_cooldown_seconds', 0))}s")],
     ]
     live_complete_set_pilot_attempt_table = _table(

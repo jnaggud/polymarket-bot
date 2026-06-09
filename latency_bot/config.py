@@ -172,6 +172,16 @@ class LatencyBotSettings:
     live_complete_set_arb_pilot_allow_sequential_orders: bool
     live_complete_set_arb_pilot_require_fok: bool
     live_complete_set_arb_pilot_same_market_cooldown_seconds: int
+    live_complete_set_arb_pilot_private_key: str
+    live_complete_set_arb_pilot_api_key: str
+    live_complete_set_arb_pilot_api_secret: str
+    live_complete_set_arb_pilot_api_passphrase: str
+    live_complete_set_arb_pilot_funder_address: str
+    live_complete_set_arb_pilot_signature_type: int
+    live_complete_set_arb_pilot_host: str
+    live_complete_set_arb_pilot_chain_id: int
+    live_complete_set_arb_pilot_tick_size: str
+    live_complete_set_arb_pilot_neg_risk: bool
     shadow_variant_top_raw_pnl_count: int
     shadow_variant_dashboard_grid_limit: int
     shadow_variant_dashboard_reason_limit: int
@@ -378,6 +388,16 @@ class LatencyBotSettings:
             live_complete_set_arb_pilot_allow_sequential_orders=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ALLOW_SEQUENTIAL_ORDERS", "0").strip().lower() in {"1", "true", "yes", "on"},
             live_complete_set_arb_pilot_require_fok=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_REQUIRE_FOK", "1").strip().lower() in {"1", "true", "yes", "on"},
             live_complete_set_arb_pilot_same_market_cooldown_seconds=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_SAME_MARKET_COOLDOWN_SECONDS", 300),
+            live_complete_set_arb_pilot_private_key=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_PRIVATE_KEY", ""),
+            live_complete_set_arb_pilot_api_key=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_API_KEY", ""),
+            live_complete_set_arb_pilot_api_secret=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_API_SECRET", ""),
+            live_complete_set_arb_pilot_api_passphrase=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_API_PASSPHRASE", ""),
+            live_complete_set_arb_pilot_funder_address=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_FUNDER_ADDRESS", ""),
+            live_complete_set_arb_pilot_signature_type=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_SIGNATURE_TYPE", 3),
+            live_complete_set_arb_pilot_host=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_HOST", "https://clob.polymarket.com"),
+            live_complete_set_arb_pilot_chain_id=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CHAIN_ID", 137),
+            live_complete_set_arb_pilot_tick_size=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_TICK_SIZE", "0.01"),
+            live_complete_set_arb_pilot_neg_risk=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_NEG_RISK", "0").strip().lower() in {"1", "true", "yes", "on"},
             realistic_complete_set_arb_enabled=os.getenv("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             realistic_complete_set_arb_capital_usdc=_env_float("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_CAPITAL_USDC", 3000.0),
             realistic_complete_set_arb_lookback_hours=_env_int("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_LOOKBACK_HOURS", 24),
