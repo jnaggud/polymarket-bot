@@ -10,6 +10,7 @@ from bot.core import PolymarketCLI
 
 from .config import LatencyBotSettings
 from .execution.paper import (
+    run_cex_latency_paper_cycle,
     run_complete_set_arb_paper_cycle,
     run_paper_execution_cycle,
     run_promoted_variant_paper_cycle,
@@ -25,6 +26,7 @@ from .feeds.polymarket_us import fetch_polymarket_us_arb_ticks
 from .models import LatencyBotStatus
 from .risk.limits import risk_snapshot
 from .storage import (
+    append_cex_latency_paper_signals,
     append_complete_set_arb_signals,
     append_fair_values,
     append_kalshi_arb_ticks,
@@ -47,7 +49,12 @@ from .storage import (
 )
 from .strategy.complete_set_arb import build_complete_set_arb_signals
 from .strategy.fair_value import build_fair_values
-from .strategy.signals import build_shadow_btc_no_signals, build_shadow_btc_yes_variant_signals, build_signals
+from .strategy.signals import (
+    build_cex_latency_paper_signals,
+    build_shadow_btc_no_signals,
+    build_shadow_btc_yes_variant_signals,
+    build_signals,
+)
 
 
 def _now_iso() -> str:
@@ -386,6 +393,13 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         polymarket_cache=polymarket_cache,
     )
     append_complete_set_arb_signals(settings, complete_set_arb_signals, ts=_now_iso())
+    cex_latency_paper_signals = build_cex_latency_paper_signals(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        fair_values=fair_values,
+    )
+    append_cex_latency_paper_signals(settings, cex_latency_paper_signals, ts=_now_iso())
     execution = run_paper_execution_cycle(
         settings,
         markets_payload=markets_payload,
@@ -417,6 +431,13 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
     complete_set_arb_execution = run_complete_set_arb_paper_cycle(
         settings,
         signals=complete_set_arb_signals,
+        ts=_now_iso(),
+    )
+    cex_latency_paper_execution = run_cex_latency_paper_cycle(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        signals=cex_latency_paper_signals,
         ts=_now_iso(),
     )
     live_complete_set_arb_pilot = run_live_complete_set_arb_pilot_cycle(
@@ -474,6 +495,10 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "signals_seen": len(complete_set_arb_signals),
             "execution": complete_set_arb_execution,
         },
+        "cex_latency_paper": {
+            "signals_seen": len(cex_latency_paper_signals),
+            "execution": cex_latency_paper_execution,
+        },
         "live_complete_set_arb_pilot": {
             "signals_seen": len(complete_set_arb_signals),
             "execution": live_complete_set_arb_pilot,
@@ -490,6 +515,7 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "Shadow taker strategy/model variants run in parallel across configured assets, sides, and tenors without affecting live paper execution.",
             "Configured promoted variants execute through live paper positions and feed realized revenue projections.",
             "Complete-set arb prototype scans paired YES/NO asks and paper-locks paired positions when net cost is below $1.",
+            "CEX-latency directional paper bot runs separately with its own $1,000 paper bankroll.",
             "Live complete-set arb pilot is tracked separately and defaults to dry-run/safety-blocked mode.",
         ],
     }

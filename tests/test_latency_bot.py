@@ -12,20 +12,35 @@ from latency_bot.core import (
     latency_bot_summarize,
 )
 from latency_bot.dashboard import build_latency_bot_dashboard_state, render_latency_bot_dashboard_html
-from latency_bot.execution.paper import run_complete_set_arb_paper_cycle, run_paper_execution_cycle, run_promoted_variant_paper_cycle
+from latency_bot.execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
+from latency_bot.execution.paper import (
+    run_cex_latency_paper_cycle,
+    run_complete_set_arb_paper_cycle,
+    run_paper_execution_cycle,
+    run_promoted_variant_paper_cycle,
+)
 from latency_bot.feeds.binance import refresh_binance_cache
 from latency_bot.feeds.discovery import _normalize_latency_discovery_payload
 from latency_bot.feeds.polymarket import refresh_polymarket_cache
 from latency_bot.strategy.fair_value import build_fair_values, compute_updown_fair_yes
 from latency_bot.strategy.complete_set_arb import build_complete_set_arb_signals
-from latency_bot.strategy.signals import build_shadow_btc_no_signals, build_shadow_btc_yes_variant_signals, build_signals
+from latency_bot.strategy.signals import (
+    build_cex_latency_paper_signals,
+    build_shadow_btc_no_signals,
+    build_shadow_btc_yes_variant_signals,
+    build_signals,
+)
 from latency_bot.storage import (
+    append_cex_latency_paper_signals,
     append_complete_set_arb_signals,
     close_position,
     connect_latency_bot_db,
     create_position,
+    latency_bot_cex_latency_paper_stats,
     latency_bot_complete_set_arb_stats,
+    latency_bot_live_complete_set_arb_pilot_stats,
     latency_bot_performance_stats,
+    load_cex_latency_paper_open_positions,
     load_open_orders,
     load_open_positions,
 )
@@ -157,11 +172,14 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             live_complete_set_arb_pilot_min_depth_usdc=10.0,
             live_complete_set_arb_pilot_depth_haircut=0.50,
             live_complete_set_arb_pilot_extra_slippage_per_share=0.0030,
+            live_complete_set_arb_pilot_min_seconds_left=180,
+            live_complete_set_arb_pilot_min_leg_amount_usdc=1.0,
             live_complete_set_arb_pilot_max_sets_per_cycle=1,
             live_complete_set_arb_pilot_max_open_sets=1,
             live_complete_set_arb_pilot_daily_loss_limit_usdc=5.0,
             live_complete_set_arb_pilot_allow_sequential_orders=False,
             live_complete_set_arb_pilot_require_fok=True,
+            live_complete_set_arb_pilot_enable_rescue=True,
             live_complete_set_arb_pilot_same_market_cooldown_seconds=300,
             live_complete_set_arb_pilot_private_key="",
             live_complete_set_arb_pilot_api_key="",
@@ -173,6 +191,21 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             live_complete_set_arb_pilot_chain_id=137,
             live_complete_set_arb_pilot_tick_size="0.01",
             live_complete_set_arb_pilot_neg_risk=False,
+            preowned_inventory_arb_capital_usdc=50.0,
+            preowned_inventory_arb_notional_usdc=15.66,
+            preowned_inventory_arb_seed_side_notional_usdc=7.83,
+            preowned_inventory_arb_min_edge_per_share=0.0200,
+            preowned_inventory_arb_min_depth_usdc=2.0,
+            preowned_inventory_arb_min_seconds_left=60,
+            preowned_inventory_arb_seed_min_seconds_left=180,
+            preowned_inventory_arb_seed_max_seconds_left=900,
+            preowned_inventory_arb_seed_max_complete_set_cost=1.0,
+            preowned_inventory_arb_seed_min_depth_usdc=0.0,
+            preowned_inventory_arb_same_market_cooldown_seconds=300,
+            preowned_inventory_arb_max_open_seeded_markets=3,
+            preowned_inventory_arb_per_asset_time_bucket_cap=1,
+            preowned_inventory_arb_time_bucket_seconds=300,
+            preowned_inventory_arb_seed_require_original_eligible=False,
             shadow_variant_top_raw_pnl_count=10,
             shadow_variant_dashboard_grid_limit=40,
             shadow_variant_dashboard_reason_limit=120,
@@ -490,6 +523,253 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             self.assertEqual(stats["summary"]["closed"], 1)
             self.assertGreater(stats["summary"]["net_pnl"], 0.0)
 
+    def test_cex_latency_paper_bot_dashboard_pane(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                cex_latency_paper_enabled=True,
+                cex_latency_paper_capital_usdc=1000.0,
+                cex_latency_paper_notional_usdc=100.0,
+                cex_latency_paper_max_open_positions=2,
+                cex_latency_paper_assets=("btc",),
+                cex_latency_paper_min_edge_per_share=0.03,
+                cex_latency_paper_min_depth_usdc=100.0,
+                cex_latency_paper_max_book_age_ms=15000.0,
+                cex_latency_paper_min_seconds_left_5m=0,
+                cex_latency_paper_max_seconds_left=999999,
+                cex_latency_paper_min_trade_price=0.01,
+                cex_latency_paper_max_trade_price=0.99,
+                cex_latency_paper_model="fair",
+                cex_latency_paper_stop_loss_fraction=0.50,
+                cex_latency_paper_take_profit_fraction=0.20,
+                cex_latency_paper_exit_edge_floor=0.01,
+                cex_latency_paper_force_exit_seconds=0,
+                cex_latency_paper_same_market_cooldown_seconds=0,
+                taker_slippage_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-cex-5m",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                        "question": "Bitcoin Up or Down - test",
+                    }
+                ]
+            }
+            polymarket_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-cex-5m",
+                        "asset": "btc",
+                        "best_bid": 0.39,
+                        "best_ask": 0.40,
+                        "no_best_bid": 0.59,
+                        "no_best_ask": 0.60,
+                        "min_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            fair_values = [
+                {
+                    "market_id": "btc-cex-5m",
+                    "asset": "btc",
+                    "fair_yes": 0.55,
+                    "fair_no": 0.45,
+                    "reference_price": 100.0,
+                    "volatility": 0.001,
+                    "time_to_expiry_sec": 300.0,
+                }
+            ]
+            signals = build_cex_latency_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=polymarket_cache,
+                fair_values=fair_values,
+            )
+            self.assertEqual(len(signals), 1)
+            self.assertTrue(signals[0]["eligible"])
+            self.assertEqual(signals[0]["side"], "YES")
+            append_cex_latency_paper_signals(settings, signals, ts="2099-05-07T15:00:00Z")
+            open_result = run_cex_latency_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=polymarket_cache,
+                signals=signals,
+                ts="2099-05-07T15:00:00Z",
+            )
+            self.assertEqual(open_result["opened_positions_count"], 1)
+            self.assertEqual(len(load_cex_latency_paper_open_positions(settings)), 1)
+
+            exit_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-cex-5m",
+                        "asset": "btc",
+                        "best_bid": 0.50,
+                        "best_ask": 0.51,
+                        "no_best_bid": 0.49,
+                        "no_best_ask": 0.50,
+                        "min_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            exit_signals = build_cex_latency_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=exit_cache,
+                fair_values=fair_values,
+            )
+            append_cex_latency_paper_signals(settings, exit_signals, ts="2099-05-07T15:02:00Z")
+            close_result = run_cex_latency_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=exit_cache,
+                signals=exit_signals,
+                ts="2099-05-07T15:02:00Z",
+            )
+            stats = latency_bot_cex_latency_paper_stats(settings)
+            self.assertEqual(close_result["closed_positions_count"], 1)
+            self.assertEqual(stats["summary"]["closed"], 1)
+            self.assertGreater(stats["summary"]["net_pnl"], 0.0)
+            self.assertGreater(stats["summary"]["equity_usdc"], 1000.0)
+
+            state = build_latency_bot_dashboard_state(settings, fast=True)
+            html = render_latency_bot_dashboard_html(state)
+            self.assertIn("CEX Latency Paper Bot", html)
+            self.assertIn("Separate $1,000 paper-only directional bot", html)
+
+    def test_cex_latency_quant_poc_filters_weak_signals(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                cex_latency_paper_enabled=True,
+                cex_latency_paper_assets=("btc",),
+                cex_latency_paper_model="quant_poc",
+                cex_latency_paper_min_edge_per_share=0.02,
+                cex_latency_paper_min_depth_usdc=100.0,
+                cex_latency_paper_min_seconds_left_5m=90,
+                cex_latency_paper_max_seconds_left=900,
+                cex_latency_paper_min_trade_price=0.25,
+                cex_latency_paper_max_trade_price=0.85,
+                taker_slippage_per_share=0.0,
+            )
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-quant-poc",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+            polymarket_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-quant-poc",
+                        "asset": "btc",
+                        "best_bid": 0.39,
+                        "best_ask": 0.40,
+                        "no_best_bid": 0.59,
+                        "no_best_ask": 0.60,
+                        "min_depth_usdc": 5000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+
+            weak_signals = build_cex_latency_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=polymarket_cache,
+                fair_values=[
+                    {
+                        "market_id": "btc-quant-poc",
+                        "asset": "btc",
+                        "fair_yes": 0.505,
+                        "fair_no": 0.495,
+                        "time_to_expiry_sec": 300.0,
+                    }
+                ],
+            )
+            self.assertFalse(weak_signals[0]["eligible"])
+
+            strong_signals = build_cex_latency_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=polymarket_cache,
+                fair_values=[
+                    {
+                        "market_id": "btc-quant-poc",
+                        "asset": "btc",
+                        "fair_yes": 0.65,
+                        "fair_no": 0.35,
+                        "time_to_expiry_sec": 300.0,
+                    }
+                ],
+            )
+            self.assertTrue(strong_signals[0]["eligible"])
+            self.assertEqual(strong_signals[0]["side"], "YES")
+
+    def test_live_complete_set_pilot_blocks_tiny_leg_amount(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                live_complete_set_arb_pilot_enabled=True,
+                live_complete_set_arb_pilot_mode="dry_run",
+                live_complete_set_arb_pilot_min_edge_per_share=0.0,
+                live_complete_set_arb_pilot_min_depth_usdc=5.0,
+                live_complete_set_arb_pilot_depth_haircut=1.0,
+                live_complete_set_arb_pilot_extra_slippage_per_share=0.0,
+                live_complete_set_arb_pilot_notional_usdc=15.66,
+                live_complete_set_arb_pilot_min_seconds_left=180,
+                live_complete_set_arb_pilot_min_leg_amount_usdc=1.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "eth5",
+                        "asset": "eth",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                        "yes_token_id": "yes-token",
+                        "no_token_id": "no-token",
+                    }
+                ]
+            }
+            signals = [
+                {
+                    "market_id": "eth5",
+                    "asset": "eth",
+                    "tenor_minutes": 5,
+                    "yes_ask": 0.97,
+                    "no_ask": 0.03,
+                    "gross_edge": 0.0,
+                    "net_edge": 0.01,
+                    "executable_depth_usdc": 1000.0,
+                    "book_age_ms": 100.0,
+                    "seconds_left": 240.0,
+                    "eligible": True,
+                    "reason": "complete set net edge clears threshold",
+                }
+            ]
+            result = run_live_complete_set_arb_pilot_cycle(
+                settings,
+                signals=signals,
+                markets_payload=markets_payload,
+                ts="2099-05-07T15:16:00Z",
+            )
+            stats = latency_bot_live_complete_set_arb_pilot_stats(settings)
+            self.assertEqual(len(result["blocks"]), 1)
+            self.assertEqual(result["blocks"][0]["reason"], "live pilot per-leg amount below CLOB minimum")
+            self.assertEqual(stats["summary"]["dry_run_candidates"], 0)
+
     def test_shadow_btc_yes_variant_signals_follow_fair_floors(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = replace(
@@ -679,7 +959,7 @@ class LatencyBotScaffoldTest(unittest.TestCase):
 
     def test_polymarket_refresh_prefers_direct_clob_book(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            settings = self.make_settings(tmpdir)
+            settings = replace(self.make_settings(tmpdir), cex_latency_paper_notional_usdc=100.0)
             markets_payload = {
                 "items": [
                     {
@@ -695,13 +975,15 @@ class LatencyBotScaffoldTest(unittest.TestCase):
                 "latency_bot.feeds.polymarket._fetch_clob_book",
                 return_value={
                     "bids": [{"price": "0.50", "size": "1000"}],
-                    "asks": [{"price": "0.52", "size": "1200"}],
+                    "asks": [{"price": "0.52", "size": "50"}, {"price": "0.54", "size": "1200"}],
                 },
             ):
                 cache = refresh_polymarket_cache(settings, markets_payload)
             self.assertEqual(cache["count"], 1)
             self.assertEqual(cache["items"][0]["market_id"], "btc5")
             self.assertEqual(cache["items"][0]["source"], "clob_rest_book")
+            self.assertGreater(cache["items"][0]["ask_vwap"], 0.52)
+            self.assertGreater(cache["items"][0]["ask_fillable_usdc"], 100.0)
 
     def test_polymarket_refresh_falls_back_to_shared_tape(self) -> None:
         with TemporaryDirectory() as tmpdir:

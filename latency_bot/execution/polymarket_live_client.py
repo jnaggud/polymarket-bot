@@ -52,6 +52,8 @@ class PolymarketLiveCompleteSetClient:
             return PolymarketLivePreflight(False, "official CLOB client missing create_market_order")
         if not self._method(client, "post_orders", "postOrders"):
             return PolymarketLivePreflight(False, "official CLOB client missing post_orders batch method")
+        if not self._method(client, "post_order", "postOrder"):
+            return PolymarketLivePreflight(False, "official CLOB client missing post_order method")
         return PolymarketLivePreflight(True, "official CLOB V2 client ready")
 
     def post_paired_fok_market_buys(
@@ -85,6 +87,7 @@ class PolymarketLiveCompleteSetClient:
         }
         user_balance = float(self.settings.live_complete_set_arb_pilot_capital_usdc)
         yes_order = self._create_market_order_with_fallbacks(
+            self._load_sdk(),
             create_market_order,
             token_id=yes_token_id,
             side=side_buy,
@@ -95,6 +98,7 @@ class PolymarketLiveCompleteSetClient:
             snake_options=snake_options,
         )
         no_order = self._create_market_order_with_fallbacks(
+            self._load_sdk(),
             create_market_order,
             token_id=no_token_id,
             side=side_buy,
@@ -104,9 +108,12 @@ class PolymarketLiveCompleteSetClient:
             options=options,
             snake_options=snake_options,
         )
+        batch_arg_cls = getattr(self._load_sdk(), "PostOrdersV2Args", None) or getattr(self._load_sdk(), "PostOrdersV1Args", None)
+        if batch_arg_cls is None:
+            raise RuntimeError("official CLOB SDK missing PostOrdersArgs class")
         batch_args = [
-            {"order": yes_order, "orderType": fok},
-            {"order": no_order, "orderType": fok},
+            batch_arg_cls(order=yes_order, orderType=fok),
+            batch_arg_cls(order=no_order, orderType=fok),
         ]
         response = post_orders(batch_args)
         return {
@@ -115,6 +122,101 @@ class PolymarketLiveCompleteSetClient:
             "response": response,
             "success": self._batch_success(response),
         }
+
+    def post_fok_market_sell(
+        self,
+        *,
+        token_id: str,
+        shares: float,
+        worst_price: float = 0.0,
+    ) -> dict[str, Any]:
+        preflight = self.preflight()
+        if not preflight.ok:
+            raise RuntimeError(preflight.reason)
+        client = self._build_client()
+        create_market_order = self._method(client, "create_market_order", "createMarketOrder")
+        post_order = self._method(client, "post_order", "postOrder")
+        if create_market_order is None or post_order is None:
+            raise RuntimeError("single-leg FOK rescue methods unavailable")
+
+        side_sell = self._enum_value("Side", "SELL", fallback="SELL")
+        fok = self._enum_value("OrderType", "FOK", fallback="FOK")
+        options = {
+            "tickSize": str(self.settings.live_complete_set_arb_pilot_tick_size),
+            "negRisk": bool(self.settings.live_complete_set_arb_pilot_neg_risk),
+        }
+        snake_options = {
+            "tick_size": str(self.settings.live_complete_set_arb_pilot_tick_size),
+            "neg_risk": bool(self.settings.live_complete_set_arb_pilot_neg_risk),
+        }
+        order = self._create_market_order_with_fallbacks(
+            self._load_sdk(),
+            create_market_order,
+            token_id=token_id,
+            side=side_sell,
+            amount=shares,
+            price=worst_price,
+            user_balance=float(self.settings.live_complete_set_arb_pilot_capital_usdc),
+            options=options,
+            snake_options=snake_options,
+        )
+        response = post_order(order, order_type=fok)
+        return {
+            "order": order,
+            "response": response,
+            "success": self._order_success(response),
+        }
+
+    def get_collateral_balance_allowance(self) -> dict[str, Any]:
+        preflight = self.preflight()
+        if not preflight.ok:
+            raise RuntimeError(preflight.reason)
+        client = self._build_client()
+        sdk = self._load_sdk()
+        get_balance_allowance = self._method(client, "get_balance_allowance", "getBalanceAllowance")
+        if get_balance_allowance is None:
+            raise RuntimeError("official CLOB client missing get_balance_allowance")
+        params_cls = getattr(sdk, "BalanceAllowanceParams", None)
+        asset_type = getattr(sdk, "AssetType", None)
+        if params_cls is None or asset_type is None:
+            raise RuntimeError("official CLOB SDK missing balance allowance params")
+        params = params_cls(
+            asset_type=getattr(asset_type, "COLLATERAL", "COLLATERAL"),
+            signature_type=int(self.settings.live_complete_set_arb_pilot_signature_type),
+        )
+        response = get_balance_allowance(params)
+        return response if isinstance(response, dict) else {"response": response}
+
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        preflight = self.preflight()
+        if not preflight.ok:
+            raise RuntimeError(preflight.reason)
+        client = self._build_client()
+        get_open_orders = self._method(client, "get_open_orders", "getOpenOrders")
+        if get_open_orders is None:
+            raise RuntimeError("official CLOB client missing get_open_orders")
+        response = get_open_orders()
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        return []
+
+    def get_recent_trades(self) -> list[dict[str, Any]]:
+        preflight = self.preflight()
+        if not preflight.ok:
+            raise RuntimeError(preflight.reason)
+        client = self._build_client()
+        sdk = self._load_sdk()
+        get_trades = self._method(client, "get_trades", "getTrades")
+        if get_trades is None:
+            raise RuntimeError("official CLOB client missing get_trades")
+        params_cls = getattr(sdk, "TradeParams", None)
+        if params_cls is None:
+            raise RuntimeError("official CLOB SDK missing trade params")
+        params = params_cls(maker_address=self.settings.live_complete_set_arb_pilot_funder_address)
+        response = get_trades(params, only_first_page=True)
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        return []
 
     def _load_sdk(self) -> Any:
         if self._sdk is not None:
@@ -160,6 +262,7 @@ class PolymarketLiveCompleteSetClient:
 
     @staticmethod
     def _create_market_order_with_fallbacks(
+        sdk: Any,
         create_market_order: Any,
         *,
         token_id: str,
@@ -170,6 +273,20 @@ class PolymarketLiveCompleteSetClient:
         options: dict[str, Any],
         snake_options: dict[str, Any],
     ) -> Any:
+        market_order_args_cls = getattr(sdk, "MarketOrderArgs", None)
+        options_cls = getattr(sdk, "PartialCreateOrderOptions", None)
+        if market_order_args_cls is not None and options_cls is not None:
+            order_args = market_order_args_cls(
+                token_id=token_id,
+                side=side,
+                amount=float(amount),
+                price=float(price),
+                order_type=getattr(sdk.OrderType, "FOK", "FOK"),
+                user_usdc_balance=user_balance,
+            )
+            create_options = options_cls(**snake_options)
+            return create_market_order(order_args, create_options)
+
         payloads = [
             {"tokenID": token_id, "side": side, "amount": float(amount), "price": float(price), "userUSDCBalance": user_balance},
             {"token_id": token_id, "side": side, "amount": float(amount), "price": float(price), "user_usdc_balance": user_balance},
@@ -202,7 +319,10 @@ class PolymarketLiveCompleteSetClient:
     def _order_success(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
-        if "success" in payload:
-            return bool(payload.get("success"))
+        error_msg = str(payload.get("errorMsg") or payload.get("error_msg") or "").strip()
+        if error_msg:
+            return False
         status = str(payload.get("status") or "").strip().lower()
-        return status in {"filled", "matched", "success", "live", "open"}
+        if status:
+            return status in {"filled", "matched", "success", "live", "open"}
+        return False

@@ -166,11 +166,14 @@ class LatencyBotSettings:
     live_complete_set_arb_pilot_min_depth_usdc: float
     live_complete_set_arb_pilot_depth_haircut: float
     live_complete_set_arb_pilot_extra_slippage_per_share: float
+    live_complete_set_arb_pilot_min_seconds_left: int
+    live_complete_set_arb_pilot_min_leg_amount_usdc: float
     live_complete_set_arb_pilot_max_sets_per_cycle: int
     live_complete_set_arb_pilot_max_open_sets: int
     live_complete_set_arb_pilot_daily_loss_limit_usdc: float
     live_complete_set_arb_pilot_allow_sequential_orders: bool
     live_complete_set_arb_pilot_require_fok: bool
+    live_complete_set_arb_pilot_enable_rescue: bool
     live_complete_set_arb_pilot_same_market_cooldown_seconds: int
     live_complete_set_arb_pilot_private_key: str
     live_complete_set_arb_pilot_api_key: str
@@ -203,6 +206,40 @@ class LatencyBotSettings:
     realistic_complete_set_arb_failed_leg_loss_fraction: float = 0.0100
     realistic_complete_set_arb_operational_failure_rate: float = 0.02
     realistic_complete_set_arb_redeem_lag_seconds: int = 60
+    preowned_inventory_arb_capital_usdc: float = 50.0
+    preowned_inventory_arb_notional_usdc: float = 15.66
+    preowned_inventory_arb_seed_side_notional_usdc: float = 7.83
+    preowned_inventory_arb_min_edge_per_share: float = 0.0200
+    preowned_inventory_arb_min_depth_usdc: float = 2.0
+    preowned_inventory_arb_min_seconds_left: int = 60
+    preowned_inventory_arb_seed_min_seconds_left: int = 180
+    preowned_inventory_arb_seed_max_seconds_left: int = 900
+    preowned_inventory_arb_seed_max_complete_set_cost: float = 1.0
+    preowned_inventory_arb_seed_min_depth_usdc: float = 0.0
+    preowned_inventory_arb_same_market_cooldown_seconds: int = 300
+    preowned_inventory_arb_max_open_seeded_markets: int = 3
+    preowned_inventory_arb_per_asset_time_bucket_cap: int = 1
+    preowned_inventory_arb_time_bucket_seconds: int = 300
+    preowned_inventory_arb_seed_require_original_eligible: bool = False
+    cex_latency_paper_enabled: bool = True
+    cex_latency_paper_capital_usdc: float = 1000.0
+    cex_latency_paper_notional_usdc: float = 50.0
+    cex_latency_paper_max_open_positions: int = 3
+    cex_latency_paper_assets: tuple[str, ...] = ("btc", "eth")
+    cex_latency_paper_min_edge_per_share: float = 0.0200
+    cex_latency_paper_min_depth_usdc: float = 750.0
+    cex_latency_paper_max_book_age_ms: float = 15000.0
+    cex_latency_paper_min_seconds_left_5m: int = 90
+    cex_latency_paper_min_seconds_left_15m: int = 180
+    cex_latency_paper_max_seconds_left: int = 900
+    cex_latency_paper_min_trade_price: float = 0.25
+    cex_latency_paper_max_trade_price: float = 0.85
+    cex_latency_paper_model: str = "quant_poc"
+    cex_latency_paper_stop_loss_fraction: float = 0.35
+    cex_latency_paper_take_profit_fraction: float = 0.35
+    cex_latency_paper_exit_edge_floor: float = 0.0100
+    cex_latency_paper_force_exit_seconds: int = 30
+    cex_latency_paper_same_market_cooldown_seconds: int = 300
     polymarket_us_arb_enabled: bool = True
     polymarket_us_arb_symbols: tuple[str, ...] = ()
     polymarket_us_arb_orderbook_endpoint: str = "https://api.prod.polymarketexchange.com/v1/orderbook"
@@ -382,11 +419,14 @@ class LatencyBotSettings:
             live_complete_set_arb_pilot_min_depth_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_DEPTH_USDC", 10.0),
             live_complete_set_arb_pilot_depth_haircut=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_DEPTH_HAIRCUT", 0.50),
             live_complete_set_arb_pilot_extra_slippage_per_share=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_EXTRA_SLIPPAGE_PER_SHARE", 0.0030),
+            live_complete_set_arb_pilot_min_seconds_left=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_SECONDS_LEFT", 180),
+            live_complete_set_arb_pilot_min_leg_amount_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_LEG_AMOUNT_USDC", 1.0),
             live_complete_set_arb_pilot_max_sets_per_cycle=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MAX_SETS_PER_CYCLE", 1),
             live_complete_set_arb_pilot_max_open_sets=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MAX_OPEN_SETS", 1),
             live_complete_set_arb_pilot_daily_loss_limit_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_DAILY_LOSS_LIMIT_USDC", 5.0),
             live_complete_set_arb_pilot_allow_sequential_orders=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ALLOW_SEQUENTIAL_ORDERS", "0").strip().lower() in {"1", "true", "yes", "on"},
             live_complete_set_arb_pilot_require_fok=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_REQUIRE_FOK", "1").strip().lower() in {"1", "true", "yes", "on"},
+            live_complete_set_arb_pilot_enable_rescue=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ENABLE_RESCUE", "1").strip().lower() in {"1", "true", "yes", "on"},
             live_complete_set_arb_pilot_same_market_cooldown_seconds=_env_int("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_SAME_MARKET_COOLDOWN_SECONDS", 300),
             live_complete_set_arb_pilot_private_key=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_PRIVATE_KEY", ""),
             live_complete_set_arb_pilot_api_key=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_API_KEY", ""),
@@ -409,6 +449,40 @@ class LatencyBotSettings:
             realistic_complete_set_arb_failed_leg_loss_fraction=_env_float("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_FAILED_LEG_LOSS_FRACTION", 0.0100),
             realistic_complete_set_arb_operational_failure_rate=_env_float("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_OPERATIONAL_FAILURE_RATE", 0.02),
             realistic_complete_set_arb_redeem_lag_seconds=_env_int("LATENCY_BOT_REALISTIC_COMPLETE_SET_ARB_REDEEM_LAG_SECONDS", 60),
+            preowned_inventory_arb_capital_usdc=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_CAPITAL_USDC", 50.0),
+            preowned_inventory_arb_notional_usdc=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_NOTIONAL_USDC", 15.66),
+            preowned_inventory_arb_seed_side_notional_usdc=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_SIDE_NOTIONAL_USDC", 7.83),
+            preowned_inventory_arb_min_edge_per_share=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_MIN_EDGE_PER_SHARE", 0.0200),
+            preowned_inventory_arb_min_depth_usdc=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_MIN_DEPTH_USDC", 2.0),
+            preowned_inventory_arb_min_seconds_left=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_MIN_SECONDS_LEFT", 60),
+            preowned_inventory_arb_seed_min_seconds_left=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_MIN_SECONDS_LEFT", 180),
+            preowned_inventory_arb_seed_max_seconds_left=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_MAX_SECONDS_LEFT", 900),
+            preowned_inventory_arb_seed_max_complete_set_cost=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_MAX_COMPLETE_SET_COST", 1.0),
+            preowned_inventory_arb_seed_min_depth_usdc=_env_float("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_MIN_DEPTH_USDC", 0.0),
+            preowned_inventory_arb_same_market_cooldown_seconds=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SAME_MARKET_COOLDOWN_SECONDS", 300),
+            preowned_inventory_arb_max_open_seeded_markets=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_MAX_OPEN_SEEDED_MARKETS", 3),
+            preowned_inventory_arb_per_asset_time_bucket_cap=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_PER_ASSET_TIME_BUCKET_CAP", 1),
+            preowned_inventory_arb_time_bucket_seconds=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_TIME_BUCKET_SECONDS", 300),
+            preowned_inventory_arb_seed_require_original_eligible=os.getenv("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_REQUIRE_ORIGINAL_ELIGIBLE", "0").strip().lower() in {"1", "true", "yes", "on"},
+            cex_latency_paper_enabled=os.getenv("LATENCY_BOT_CEX_LATENCY_PAPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            cex_latency_paper_capital_usdc=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_CAPITAL_USDC", 1000.0),
+            cex_latency_paper_notional_usdc=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_NOTIONAL_USDC", 50.0),
+            cex_latency_paper_max_open_positions=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_MAX_OPEN_POSITIONS", 3),
+            cex_latency_paper_assets=_env_csv_str("LATENCY_BOT_CEX_LATENCY_PAPER_ASSETS", ("btc", "eth")),
+            cex_latency_paper_min_edge_per_share=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_MIN_EDGE_PER_SHARE", 0.0200),
+            cex_latency_paper_min_depth_usdc=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_MIN_DEPTH_USDC", 750.0),
+            cex_latency_paper_max_book_age_ms=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_MAX_BOOK_AGE_MS", 15000.0),
+            cex_latency_paper_min_seconds_left_5m=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_MIN_SECONDS_LEFT_5M", 90),
+            cex_latency_paper_min_seconds_left_15m=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_MIN_SECONDS_LEFT_15M", 180),
+            cex_latency_paper_max_seconds_left=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_MAX_SECONDS_LEFT", 900),
+            cex_latency_paper_min_trade_price=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_MIN_TRADE_PRICE", 0.25),
+            cex_latency_paper_max_trade_price=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_MAX_TRADE_PRICE", 0.85),
+            cex_latency_paper_model=os.getenv("LATENCY_BOT_CEX_LATENCY_PAPER_MODEL", "quant_poc").strip().lower(),
+            cex_latency_paper_stop_loss_fraction=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_STOP_LOSS_FRACTION", 0.35),
+            cex_latency_paper_take_profit_fraction=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_TAKE_PROFIT_FRACTION", 0.35),
+            cex_latency_paper_exit_edge_floor=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_EXIT_EDGE_FLOOR", 0.0100),
+            cex_latency_paper_force_exit_seconds=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_FORCE_EXIT_SECONDS", 30),
+            cex_latency_paper_same_market_cooldown_seconds=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_SAME_MARKET_COOLDOWN_SECONDS", 300),
             polymarket_us_arb_enabled=os.getenv("LATENCY_BOT_POLYMARKET_US_ARB_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             polymarket_us_arb_symbols=_env_csv_str("LATENCY_BOT_POLYMARKET_US_ARB_SYMBOLS", ()),
             polymarket_us_arb_orderbook_endpoint=os.getenv(

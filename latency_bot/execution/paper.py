@@ -7,11 +7,13 @@ from ..config import LatencyBotSettings
 from ..risk.limits import can_open_new_position
 from ..storage import (
     cancel_order,
+    close_cex_latency_paper_position,
     close_position,
     close_complete_set_arb_position,
     close_shadow_position,
     close_shadow_variant_position,
     connect_latency_bot_db,
+    create_cex_latency_paper_position,
     create_order,
     create_complete_set_arb_position,
     create_position,
@@ -19,6 +21,7 @@ from ..storage import (
     create_shadow_variant_position,
     fill_open_order_as_position,
     load_latest_polymarket_books,
+    load_cex_latency_paper_open_positions,
     load_open_orders,
     load_open_positions,
     load_recent_position_closes,
@@ -109,6 +112,51 @@ def _complete_set_recently_traded(settings: LatencyBotSettings, *, market_id: st
         except Exception:
             continue
     return False
+
+
+def _cex_latency_recently_traded(settings: LatencyBotSettings, *, market_id: str, ts: str) -> bool:
+    if settings.cex_latency_paper_same_market_cooldown_seconds <= 0:
+        return False
+    cutoff = _ts_to_dt(ts).timestamp() - float(settings.cex_latency_paper_same_market_cooldown_seconds)
+    with connect_latency_bot_db(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT entry_ts
+            FROM cex_latency_paper_positions
+            WHERE market_id = ?
+            ORDER BY entry_ts DESC
+            LIMIT 5
+            """,
+            (market_id,),
+        ).fetchall()
+    for row in rows:
+        try:
+            if _ts_to_dt(str(row["entry_ts"] or "")).timestamp() >= cutoff:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _cex_latency_exit_price(position: dict[str, Any], cache: dict[str, Any]) -> float:
+    side = str(position.get("side") or "").upper()
+    best_bid = float(cache.get("best_bid") or 0.0)
+    best_ask = float(cache.get("best_ask") or 0.0)
+    if side == "YES":
+        return float(cache.get("bid_vwap") or best_bid)
+    no_bid = cache.get("no_best_bid")
+    no_bid_vwap = cache.get("no_bid_vwap")
+    if no_bid_vwap is not None:
+        return float(no_bid_vwap or 0.0)
+    if no_bid is not None:
+        return float(no_bid or 0.0)
+    return max(1.0 - best_ask, 0.0)
+
+
+def _cex_latency_pnl(position: dict[str, Any], exit_price: float) -> float:
+    size = float(position.get("size") or 0.0)
+    entry = float(position.get("entry_price") or 0.0)
+    return round((exit_price - entry) * size, 6)
 
 
 def _quote_life_seconds(settings: LatencyBotSettings, *, tenor_minutes: int) -> int:
@@ -444,6 +492,157 @@ def run_paper_execution_cycle(
         "entry_blocks": entry_blocks,
         "open_positions_count": len(load_open_positions(settings)),
         "open_orders_count": len(load_open_orders(settings)),
+    }
+
+
+def run_cex_latency_paper_cycle(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    signals: list[dict[str, Any]],
+    ts: str,
+) -> dict[str, Any]:
+    if not settings.cex_latency_paper_enabled:
+        return {
+            "opened_positions_count": 0,
+            "closed_positions_count": 0,
+            "opened": [],
+            "closed": [],
+            "entry_blocks_count": 0,
+            "entry_blocks": [],
+            "open_positions_count": 0,
+            "open_capital_usdc": 0.0,
+        }
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_id = {str(item.get("market_id") or ""): item for item in markets if isinstance(item, dict)}
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    open_positions = load_cex_latency_paper_open_positions(settings)
+    latest_books = load_latest_polymarket_books(settings, [str(item.get("market_id") or "") for item in open_positions])
+    signal_by_market = {str(item.get("market_id") or ""): item for item in signals if isinstance(item, dict)}
+    opened: list[dict[str, Any]] = []
+    closed: list[dict[str, Any]] = []
+    entry_blocks: list[dict[str, Any]] = []
+
+    for position in open_positions:
+        market_id = str(position.get("market_id") or "")
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id) or latest_books.get(market_id)
+        if cache is None:
+            continue
+        matching_signal = signal_by_market.get(market_id)
+        exit_price = _cex_latency_exit_price(position, cache)
+        position_side = str(position.get("side") or "").upper()
+        signal_side = str((matching_signal or {}).get("side") or "").upper()
+        held_seconds = (_ts_to_dt(ts) - _ts_to_dt(str(position.get("entry_ts") or ts))).total_seconds()
+        entry_price = float(position.get("entry_price") or 0.0)
+        current_edge = float((matching_signal or {}).get("edge") or 0.0) if signal_side == position_side else 0.0
+        should_close = False
+        reason = ""
+        if market is None:
+            should_close = True
+            reason = "MARKET_ROLLED_OFF"
+        elif exit_price <= 0.0:
+            should_close = False
+        elif entry_price > 0.0 and exit_price <= entry_price * (1.0 - settings.cex_latency_paper_stop_loss_fraction):
+            should_close = True
+            reason = "STOP_LOSS"
+        elif entry_price > 0.0 and exit_price >= entry_price * (1.0 + settings.cex_latency_paper_take_profit_fraction):
+            should_close = True
+            reason = "TAKE_PROFIT"
+        elif _seconds_remaining(market) <= settings.cex_latency_paper_force_exit_seconds:
+            should_close = True
+            reason = "TIME_EXIT"
+        elif (
+            held_seconds >= settings.min_hold_seconds_before_edge_close
+            and (
+                matching_signal is None
+                or not bool(matching_signal.get("eligible"))
+                or signal_side != position_side
+                or current_edge < settings.cex_latency_paper_exit_edge_floor
+            )
+        ):
+            should_close = True
+            reason = "EDGE_CLOSED"
+        if should_close:
+            pnl = _cex_latency_pnl(position, exit_price)
+            close_cex_latency_paper_position(
+                settings,
+                position_id=str(position.get("position_id") or ""),
+                ts=ts,
+                exit_price=exit_price,
+                pnl=pnl,
+                reason=reason,
+                edge=current_edge,
+            )
+            closed.append({"market_id": market_id, "reason": reason, "pnl": pnl, "exit_price": exit_price})
+
+    open_positions = load_cex_latency_paper_open_positions(settings)
+    open_by_market = {str(item.get("market_id") or ""): item for item in open_positions}
+    open_capital = round(sum(float(item.get("notional_usdc") or 0.0) for item in open_positions), 6)
+    available_capital = max(float(settings.cex_latency_paper_capital_usdc) - open_capital, 0.0)
+    eligible_signals = sorted(
+        [item for item in signals if bool(item.get("eligible"))],
+        key=lambda item: float(item.get("edge") or 0.0),
+        reverse=True,
+    )
+    for signal in eligible_signals:
+        if len(open_positions) >= settings.cex_latency_paper_max_open_positions:
+            break
+        market_id = str(signal.get("market_id") or "")
+        if not market_id or market_id in open_by_market:
+            continue
+        market = market_by_id.get(market_id)
+        if market is None:
+            entry_blocks.append({"market_id": market_id, "reason": "market unavailable"})
+            continue
+        if _seconds_remaining(market) <= settings.cex_latency_paper_force_exit_seconds:
+            entry_blocks.append({"market_id": market_id, "reason": "too close to expiry"})
+            continue
+        if _cex_latency_recently_traded(settings, market_id=market_id, ts=ts):
+            entry_blocks.append({"market_id": market_id, "reason": "same market cooldown"})
+            continue
+        side = str(signal.get("side") or "").upper()
+        if side not in {"YES", "NO"}:
+            side = "YES" if "YES" in str(signal.get("signal_type") or "") else "NO"
+        entry_price = float(signal.get("order_price") or 0.0)
+        if entry_price <= 0.0:
+            entry_price = float(signal.get("yes_ask") or 0.0) if side == "YES" else float(signal.get("no_ask") or 0.0)
+        if entry_price <= 0.0 or entry_price < settings.cex_latency_paper_min_trade_price or entry_price > settings.cex_latency_paper_max_trade_price:
+            entry_blocks.append({"market_id": market_id, "reason": "price outside cex-latency band"})
+            continue
+        notional = min(float(settings.cex_latency_paper_notional_usdc), available_capital)
+        if notional < 5.0:
+            entry_blocks.append({"market_id": market_id, "reason": "insufficient paper capital"})
+            break
+        size = notional / entry_price
+        position = create_cex_latency_paper_position(
+            settings,
+            ts=ts,
+            market_id=market_id,
+            asset=str(signal.get("asset") or ""),
+            side=side,
+            entry_price=entry_price,
+            size=size,
+            signal=signal,
+        )
+        opened.append(position)
+        open_positions.append(position)
+        open_by_market[market_id] = position
+        open_capital = round(open_capital + notional, 6)
+        available_capital = max(float(settings.cex_latency_paper_capital_usdc) - open_capital, 0.0)
+
+    final_open_positions = load_cex_latency_paper_open_positions(settings)
+    return {
+        "opened_positions_count": len(opened),
+        "closed_positions_count": len(closed),
+        "opened": opened,
+        "closed": closed,
+        "entry_blocks_count": len(entry_blocks),
+        "entry_blocks": entry_blocks,
+        "open_positions_count": len(final_open_positions),
+        "open_capital_usdc": round(sum(float(item.get("notional_usdc") or 0.0) for item in final_open_positions), 6),
     }
 
 

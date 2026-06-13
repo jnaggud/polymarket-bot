@@ -3,18 +3,22 @@ from __future__ import annotations
 from dataclasses import replace
 import html
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from .config import LatencyBotSettings
 from .storage import (
+    connect_latency_bot_db,
     init_latency_bot_db,
     latency_bot_capital_usage,
+    latency_bot_cex_latency_paper_stats,
     latency_bot_equity_curve,
     latency_bot_complete_set_arb_stats,
     latency_bot_kalshi_arb_sim,
@@ -22,7 +26,9 @@ from .storage import (
     latency_bot_live_complete_set_arb_pilot_stats,
     latency_bot_opportunity_stats,
     latency_bot_performance_stats,
+    latency_bot_polymarket_account_reconciliation,
     latency_bot_polymarket_us_arb_sim,
+    latency_bot_preowned_inventory_arb_sim,
     latency_bot_signal_feature_stats,
     latency_bot_portfolio_summary,
     latency_bot_promoted_variant_performance_stats,
@@ -43,6 +49,9 @@ DISPLAY_TZ = ZoneInfo("America/Chicago")
 _SHADOW_VARIANT_CACHE_TTL_SECONDS = 60.0
 _SHADOW_VARIANT_CACHE_LOCK = threading.Lock()
 _SHADOW_VARIANT_CACHE: dict[str, Any] = {"key": "", "loaded_at": 0.0, "payload": None}
+_DASHBOARD_STATE_CACHE_TTL_SECONDS = 5.0
+_DASHBOARD_STATE_CACHE_LOCK = threading.Lock()
+_DASHBOARD_STATE_CACHE: dict[str, Any] = {"key": "", "loaded_at": 0.0, "payload": None}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -450,57 +459,167 @@ def _cached_shadow_variant_performance_stats(settings: LatencyBotSettings) -> di
         return payload
 
 
-def build_latency_bot_dashboard_state(settings: LatencyBotSettings) -> dict[str, Any]:
+def _summarize_latency_bot_db_fast(settings: LatencyBotSettings, minutes: int = 60) -> dict[str, Any]:
+    if not settings.db_path.exists():
+        return {
+            "db_present": False,
+            "db_path": str(settings.db_path),
+            "lookback_minutes": minutes,
+        }
+    since = (datetime.now(timezone.utc) - timedelta(minutes=max(minutes, 1))).isoformat().replace("+00:00", "Z")
+    recent_counts: dict[str, int] = {}
+    with connect_latency_bot_db(settings) as conn:
+        def count_recent(table: str, ts_column: str = "ts") -> int:
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE {ts_column} >= ?",
+                    (since,),
+                ).fetchone()
+                return int(row["count"]) if row else 0
+            except Exception:
+                return 0
+
+        for key, table in (
+            ("binance_ticks", "binance_ticks"),
+            ("polymarket_books", "polymarket_books"),
+            ("fair_values", "fair_values"),
+            ("signals", "signals"),
+            ("shadow_signals", "shadow_signals"),
+            ("shadow_variant_signals", "shadow_variant_signals"),
+            ("cex_latency_paper_signals", "cex_latency_paper_signals"),
+            ("complete_set_arb_signals", "complete_set_arb_signals"),
+            ("live_complete_set_arb_pilot_attempts", "live_complete_set_arb_pilot_attempts"),
+            ("polymarket_us_arb_ticks", "polymarket_us_arb_ticks"),
+            ("kalshi_arb_ticks", "kalshi_arb_ticks"),
+            ("fills", "fills"),
+            ("missed_opportunities", "missed_opportunities"),
+            ("engine_cycles", "engine_cycles"),
+        ):
+            recent_counts[key] = count_recent(table)
+        try:
+            close_row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM complete_set_arb_events
+                WHERE ts >= ? AND event_type = 'close'
+                """,
+                (since,),
+            ).fetchone()
+            recent_counts["complete_set_arb_closes"] = int(close_row["count"]) if close_row else 0
+        except Exception:
+            recent_counts["complete_set_arb_closes"] = 0
+        latest_cycle = conn.execute(
+            """
+            SELECT ts, phase, markets_tracked, signals_seen, orders_open, positions_open, risk_state, notes
+            FROM engine_cycles
+            ORDER BY ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return {
+        "db_present": True,
+        "db_path": str(settings.db_path),
+        "lookback_minutes": minutes,
+        "recent_counts": recent_counts,
+        "totals": {},
+        "latest_cycle": dict(latest_cycle) if latest_cycle else {},
+    }
+
+
+def _cached_dashboard_state(settings: LatencyBotSettings, *, fast: bool) -> dict[str, Any] | None:
+    key = f"{settings.db_path.resolve()}:{'fast' if fast else 'full'}"
+    now = time.monotonic()
+    with _DASHBOARD_STATE_CACHE_LOCK:
+        if (
+            _DASHBOARD_STATE_CACHE.get("key") == key
+            and _DASHBOARD_STATE_CACHE.get("payload") is not None
+            and now - float(_DASHBOARD_STATE_CACHE.get("loaded_at") or 0.0) < _DASHBOARD_STATE_CACHE_TTL_SECONDS
+        ):
+            payload = _DASHBOARD_STATE_CACHE["payload"]
+            return dict(payload) if isinstance(payload, dict) else None
+    return None
+
+
+def _store_dashboard_state_cache(settings: LatencyBotSettings, *, fast: bool, state: dict[str, Any]) -> None:
+    key = f"{settings.db_path.resolve()}:{'fast' if fast else 'full'}"
+    with _DASHBOARD_STATE_CACHE_LOCK:
+        _DASHBOARD_STATE_CACHE.update({"key": key, "loaded_at": time.monotonic(), "payload": dict(state)})
+
+
+def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: bool = False) -> dict[str, Any]:
+    cached = _cached_dashboard_state(settings, fast=fast)
+    if cached is not None:
+        cached["served_from_cache"] = True
+        return cached
     init_latency_bot_db(settings)
     status = _load_json(settings.status_path)
     run_metadata = _load_json(settings.db_path.parent / "latency_bot_run.json")
     markets = _load_json(settings.markets_path)
     polymarket_cache = _load_json(settings.polymarket_cache_path)
     binance_cache = _load_json(settings.binance_cache_path)
-    db_summary = summarize_latency_bot_db(settings, 60)
+    db_summary = _summarize_latency_bot_db_fast(settings, 60) if fast else summarize_latency_bot_db(settings, 60)
     since_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
     recent_signals = latest_rows_since(settings, "signals", since_ts=since_ts, limit=12)
     recent_fair_values = latest_rows_since(settings, "fair_values", since_ts=since_ts, limit=12)
     recent_fills = latest_rows_since(settings, "fills", since_ts=since_ts, limit=12)
     recent_orders = latest_rows_since(settings, "orders", since_ts=since_ts, limit=12)
     open_positions = load_open_positions(settings)
-    recent_shadow_signals = latest_shadow_rows_since(settings, "shadow_signals", since_ts=since_ts, limit=12)
-    recent_shadow_events = latest_shadow_rows_since(settings, "shadow_position_events", since_ts=since_ts, limit=12)
-    open_shadow_positions = load_shadow_open_positions(settings)
+    recent_shadow_signals = [] if fast else latest_shadow_rows_since(settings, "shadow_signals", since_ts=since_ts, limit=12)
+    recent_shadow_events = [] if fast else latest_shadow_rows_since(settings, "shadow_position_events", since_ts=since_ts, limit=12)
+    open_shadow_positions = [] if fast else load_shadow_open_positions(settings)
     portfolio = latency_bot_portfolio_summary(
         settings,
         cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
     )
-    promoted_variant_stats = latency_bot_promoted_variant_performance_stats(
-        settings,
-        cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
+    promoted_variant_stats = (
+        {"summary": {}, "variants": []}
+        if fast
+        else latency_bot_promoted_variant_performance_stats(
+            settings,
+            cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
+        )
     )
-    signal_stats = latency_bot_signal_feature_stats(settings)
-    enabled_signal_stats = latency_bot_signal_feature_stats(settings, live_enabled_only=True)
-    shadow_signal_stats = latency_bot_signal_feature_stats(settings, shadow=True)
-    live_opportunity = latency_bot_opportunity_stats(settings, shadow=False, minutes=15, live_enabled_only=True)
-    shadow_opportunity = latency_bot_opportunity_stats(settings, shadow=True, minutes=15)
-    threshold_relaxation = latency_bot_threshold_relaxation_stats(settings)
-    shadow_yes_variant_stats = _cached_shadow_variant_performance_stats(settings)
-    live_stats = latency_bot_performance_stats(settings)
-    shadow_portfolio = latency_bot_shadow_portfolio_summary(
-        settings,
-        cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
+    signal_stats = {} if fast else latency_bot_signal_feature_stats(settings)
+    enabled_signal_stats = {} if fast else latency_bot_signal_feature_stats(settings, live_enabled_only=True)
+    shadow_signal_stats = {} if fast else latency_bot_signal_feature_stats(settings, shadow=True)
+    live_opportunity = {} if fast else latency_bot_opportunity_stats(settings, shadow=False, minutes=15, live_enabled_only=True)
+    shadow_opportunity = {} if fast else latency_bot_opportunity_stats(settings, shadow=True, minutes=15)
+    threshold_relaxation = {} if fast else latency_bot_threshold_relaxation_stats(settings)
+    shadow_yes_variant_stats = {} if fast else _cached_shadow_variant_performance_stats(settings)
+    live_stats = {} if fast else latency_bot_performance_stats(settings)
+    shadow_portfolio = (
+        {}
+        if fast
+        else latency_bot_shadow_portfolio_summary(
+            settings,
+            cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
+        )
     )
     equity_curve = latency_bot_equity_curve(settings)
-    live_strategy_equity_curves = latency_bot_live_strategy_equity_curves(settings)
-    shadow_stats = latency_bot_shadow_performance_stats(settings)
-    complete_set_arb_stats = latency_bot_complete_set_arb_stats(settings)
-    realistic_complete_set_arb = latency_bot_realistic_complete_set_arb_sim(settings)
-    realistic_complete_set_arb_all_time = latency_bot_realistic_complete_set_arb_sim(
-        replace(settings, realistic_complete_set_arb_lookback_hours=24 * 365 * 20)
+    live_strategy_equity_curves = [] if fast else latency_bot_live_strategy_equity_curves(settings)
+    shadow_stats = {} if fast else latency_bot_shadow_performance_stats(settings)
+    complete_set_arb_stats = {} if fast else latency_bot_complete_set_arb_stats(settings)
+    cex_latency_paper = latency_bot_cex_latency_paper_stats(settings)
+    realistic_complete_set_arb = {} if fast else latency_bot_realistic_complete_set_arb_sim(settings)
+    preowned_inventory_arb = latency_bot_preowned_inventory_arb_sim(settings)
+    realistic_complete_set_arb_all_time = (
+        {}
+        if fast
+        else latency_bot_realistic_complete_set_arb_sim(
+            replace(settings, realistic_complete_set_arb_lookback_hours=24 * 365 * 20)
+        )
     )
     live_complete_set_arb_pilot = latency_bot_live_complete_set_arb_pilot_stats(settings)
-    polymarket_us_arb = latency_bot_polymarket_us_arb_sim(settings)
-    kalshi_arb = latency_bot_kalshi_arb_sim(settings)
+    polymarket_account_reconciliation = (
+        {} if fast else latency_bot_polymarket_account_reconciliation(settings)
+    )
+    polymarket_us_arb = {} if fast else latency_bot_polymarket_us_arb_sim(settings)
+    kalshi_arb = {} if fast else latency_bot_kalshi_arb_sim(settings)
     capital_usage = latency_bot_capital_usage(settings)
-    return {
+    state = {
         "bankroll_usdc": settings.bankroll_usdc,
+        "fast_mode": bool(fast),
+        "served_from_cache": False,
         "status": status,
         "run_metadata": run_metadata,
         "markets": markets,
@@ -530,17 +649,24 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings) -> dict[str,
         "live_strategy_equity_curves": live_strategy_equity_curves,
         "shadow_stats": shadow_stats,
         "complete_set_arb_stats": complete_set_arb_stats,
+        "cex_latency_paper": cex_latency_paper,
         "realistic_complete_set_arb": realistic_complete_set_arb,
         "realistic_complete_set_arb_all_time": realistic_complete_set_arb_all_time,
+        "preowned_inventory_arb": preowned_inventory_arb,
         "live_complete_set_arb_pilot": live_complete_set_arb_pilot,
+        "polymarket_account_reconciliation": polymarket_account_reconciliation,
         "polymarket_us_arb": polymarket_us_arb,
         "kalshi_arb": kalshi_arb,
         "capital_usage": capital_usage,
     }
+    _store_dashboard_state_cache(settings, fast=fast, state=state)
+    return state
 
 
 def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     page_generated_at = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S CT")
+    fast_mode = bool(state.get("fast_mode"))
+    served_from_cache = bool(state.get("served_from_cache"))
     status = state.get("status", {}) if isinstance(state.get("status"), dict) else {}
     run_metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
     last_cycle_result = status.get("last_cycle_result", {}) if isinstance(status.get("last_cycle_result"), dict) else {}
@@ -576,15 +702,23 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     live_strategy_equity_curves = state.get("live_strategy_equity_curves", []) if isinstance(state.get("live_strategy_equity_curves"), list) else []
     shadow_stats = state.get("shadow_stats", {}) if isinstance(state.get("shadow_stats"), dict) else {}
     complete_set_arb_stats = state.get("complete_set_arb_stats", {}) if isinstance(state.get("complete_set_arb_stats"), dict) else {}
+    cex_latency_paper = state.get("cex_latency_paper", {}) if isinstance(state.get("cex_latency_paper"), dict) else {}
     realistic_complete_set_arb = state.get("realistic_complete_set_arb", {}) if isinstance(state.get("realistic_complete_set_arb"), dict) else {}
     realistic_complete_set_arb_all_time = (
         state.get("realistic_complete_set_arb_all_time", {})
         if isinstance(state.get("realistic_complete_set_arb_all_time"), dict)
         else {}
     )
+    preowned_inventory_arb = state.get("preowned_inventory_arb", {}) if isinstance(state.get("preowned_inventory_arb"), dict) else {}
+    polymarket_account_reconciliation = (
+        state.get("polymarket_account_reconciliation", {})
+        if isinstance(state.get("polymarket_account_reconciliation"), dict)
+        else {}
+    )
     polymarket_us_arb = state.get("polymarket_us_arb", {}) if isinstance(state.get("polymarket_us_arb"), dict) else {}
     kalshi_arb = state.get("kalshi_arb", {}) if isinstance(state.get("kalshi_arb"), dict) else {}
     capital_usage = state.get("capital_usage", {}) if isinstance(state.get("capital_usage"), dict) else {}
+    cex_latency_summary = cex_latency_paper.get("summary", {}) if isinstance(cex_latency_paper.get("summary"), dict) else {}
     consensus_meta = _consensus_meta_strategy_data(shadow_yes_variant_stats)
     bankroll_usdc = float(state.get("bankroll_usdc") or 10000.0)
     last_cycle_completed = _fmt_ts(status.get("last_cycle_completed_at"))
@@ -613,6 +747,21 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Projected Yearly Revenue", html.escape(_fmt_money(portfolio.get("projected_yearly_revenue_usdc", 0.0)))],
         ["Unrealized PnL", html.escape(_fmt_money(portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0))))],
         ["Equity", html.escape(_fmt_money(portfolio.get("equity_usdc", bankroll_usdc)))],
+        ["CEX Paper Model", html.escape(str(cex_latency_summary.get("model") or "-"))],
+        ["CEX Paper Equity", html.escape(_fmt_money(cex_latency_summary.get("equity_usdc", 0.0)))],
+        ["CEX Paper Net PnL", html.escape(_fmt_money(cex_latency_summary.get("net_pnl", 0.0)))],
+        [
+            "CEX Paper Open / Closed",
+            html.escape(
+                f"{_fmt_num(cex_latency_summary.get('open', 0))} / {_fmt_num(cex_latency_summary.get('closed', 0))}"
+            ),
+        ],
+        [
+            "CEX Paper Eligible 60m",
+            html.escape(
+                f"{_fmt_num(cex_latency_summary.get('eligible_60m', 0))} / {_fmt_num(cex_latency_summary.get('signals_60m', 0))}"
+            ),
+        ],
         ["Risk State", html.escape(str(status.get("risk_state", "unknown")))],
         ["Last Cycle Started (CT)", html.escape(_fmt_ts(status.get("last_cycle_started_at")))],
         ["Last Cycle Completed (CT)", html.escape(_fmt_ts(status.get("last_cycle_completed_at")))],
@@ -643,6 +792,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Fills (60m)", html.escape(_fmt_num(recent_counts.get("fills", 0)))],
         ["Shadow Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_signals", 0)))],
         ["Shadow Variant Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_variant_signals", 0)))],
+        ["CEX Latency Paper Signals (60m)", html.escape(_fmt_num(recent_counts.get("cex_latency_paper_signals", 0)))],
         ["Complete-Set Arb Signals (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_signals", 0)))],
         ["Complete-Set Arb Closes (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_closes", 0)))],
         ["Live Arb Pilot Attempts (60m)", html.escape(_fmt_num(recent_counts.get("live_complete_set_arb_pilot_attempts", 0)))],
@@ -846,6 +996,210 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
             if isinstance(item, dict)
         ],
     )
+    cex_latency_summary = cex_latency_paper.get("summary", {}) if isinstance(cex_latency_paper.get("summary"), dict) else {}
+    cex_latency_execution_result = last_cycle_result.get("cex_latency_paper", {}) if isinstance(last_cycle_result.get("cex_latency_paper"), dict) else {}
+    cex_latency_execution = cex_latency_execution_result.get("execution", {}) if isinstance(cex_latency_execution_result.get("execution"), dict) else {}
+    cex_latency_summary_rows = [
+        ["Mode", html.escape(str(cex_latency_summary.get("mode", "CEX-latency directional paper bot")))],
+        ["Data Sources", html.escape(str(cex_latency_summary.get("data_sources", "")))],
+        ["Execution Pricing", html.escape(str(cex_latency_summary.get("execution_pricing", "")))],
+        ["Enabled", html.escape(str(bool(cex_latency_summary.get("enabled"))).lower())],
+        ["Starting Capital", html.escape(_fmt_money(cex_latency_summary.get("starting_capital_usdc", 0.0)))],
+        ["Equity", html.escape(_fmt_money(cex_latency_summary.get("equity_usdc", 0.0)))],
+        ["Net PnL", html.escape(_fmt_money(cex_latency_summary.get("net_pnl", 0.0)))],
+        ["24h Net Revenue", html.escape(_fmt_money(cex_latency_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(cex_latency_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(cex_latency_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Open Positions", html.escape(_fmt_num(cex_latency_summary.get("open", 0)))],
+        ["Closed Trades", html.escape(_fmt_num(cex_latency_summary.get("closed", 0)))],
+        ["Win Rate", html.escape(f"{100.0 * float(cex_latency_summary.get('win_rate', 0.0)):.1f}%")],
+        ["Avg PnL / Trade", html.escape(_fmt_money(cex_latency_summary.get("avg_pnl", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(cex_latency_summary.get("max_drawdown", 0.0)))],
+        ["Current Capital In Use", html.escape(_fmt_money(cex_latency_summary.get("current_capital_in_use_usdc", 0.0)))],
+        ["Current Capital / Bot Bankroll", html.escape(f"{100.0 * float(cex_latency_summary.get('current_capital_fraction', 0.0)):.1f}%")],
+        ["Target Notional / Trade", html.escape(_fmt_money(cex_latency_summary.get("target_notional_usdc", 0.0)))],
+        ["Max Open Positions", html.escape(_fmt_num(cex_latency_summary.get("max_open_positions", 0)))],
+        ["Assets", html.escape(", ".join(str(item) for item in cex_latency_summary.get("assets", [])) or "-")],
+        ["Model", html.escape(str(cex_latency_summary.get("model", "")))],
+        ["Signals 60m", html.escape(_fmt_num(cex_latency_summary.get("signals_60m", 0)))],
+        ["Eligible 60m", html.escape(_fmt_num(cex_latency_summary.get("eligible_60m", 0)))],
+        ["Eligible Rate 60m", html.escape(f"{100.0 * float(cex_latency_summary.get('eligible_rate_60m', 0.0)):.1f}%")],
+        ["Best Edge 60m", html.escape(f"{float(cex_latency_summary.get('best_edge_60m', 0.0)):.4f}")],
+        ["Min Edge / Share", html.escape(f"{float(cex_latency_summary.get('min_edge_per_share', 0.0)):.4f}")],
+        ["Min Depth", html.escape(_fmt_money(cex_latency_summary.get("min_depth_usdc", 0.0)))],
+        ["Take Profit", html.escape(f"{100.0 * float(cex_latency_summary.get('take_profit_fraction', 0.0)):.1f}%")],
+        ["Stop Loss", html.escape(f"{100.0 * float(cex_latency_summary.get('stop_loss_fraction', 0.0)):.1f}%")],
+        ["Exit Edge Floor", html.escape(f"{float(cex_latency_summary.get('exit_edge_floor', 0.0)):.4f}")],
+        ["Force Exit", html.escape(f"{_fmt_num(cex_latency_summary.get('force_exit_seconds', 0))}s")],
+        ["Last Cycle Opens", html.escape(_fmt_num(cex_latency_execution.get("opened_positions_count", 0)))],
+        ["Last Cycle Closes", html.escape(_fmt_num(cex_latency_execution.get("closed_positions_count", 0)))],
+    ]
+    cex_latency_signal_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(str(item.get("signal_type", ""))),
+                html.escape(f"{float(item.get('edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('fair_yes', 0.0)):.3f}"),
+                html.escape(f"{float(item.get('fair_no', 0.0)):.3f}"),
+                html.escape(f"{float(item.get('order_price', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("min_depth_usdc", 0.0))),
+                html.escape(f"{float(item.get('book_age_ms', 0.0)):.0f} ms"),
+                html.escape(f"{float(item.get('seconds_left', 0.0)):.1f}"),
+                html.escape("yes" if bool(item.get("eligible")) else "no"),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in cex_latency_paper.get("recent_signals", [])
+        ],
+    )
+    cex_latency_open_table = _table(
+        ["Opened (CT)", "Market", "Asset", "Side", "Entry", "Size", "Notional", "Entry Edge", "Secs Left", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("entry_ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('entry_seconds_left', 0.0)):.1f}"),
+                html.escape(str(item.get("entry_reason", ""))),
+            ]
+            for item in cex_latency_paper.get("open_positions", [])
+        ],
+    )
+    cex_latency_close_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Entry", "Exit", "Size", "Notional", "Entry Edge", "PnL", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('exit_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("pnl", 0.0))),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in cex_latency_paper.get("recent_closes", [])
+        ],
+    )
+    cex_latency_reason_table = _table(
+        ["Reason", "Count", "Max Edge"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_edge', 0.0)):.4f}"),
+            ]
+            for item in cex_latency_paper.get("reason_breakdown", [])
+        ],
+    )
+    cex_latency_threshold_table = _table(
+        ["Edge Floor", "Raw Ticks", "Unique Markets", "Best Edge", "Avg Best Edge", "Avg Entry", "Indicative Edge $"],
+        [
+            [
+                html.escape(f"{float(item.get('edge_floor', 0.0)):.3f}"),
+                html.escape(_fmt_num(item.get("raw_ticks", 0))),
+                html.escape(_fmt_num(item.get("unique_markets", 0))),
+                html.escape(f"{float(item.get('best_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('avg_best_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('avg_entry', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("indicative_edge_usdc", 0.0))),
+            ]
+            for item in cex_latency_paper.get("threshold_sensitivity", [])
+            if isinstance(item, dict)
+        ],
+    )
+    cex_latency_asset_side_table = _table(
+        ["Asset", "Side", "Closed", "Win Rate", "Net PnL", "Avg PnL", "Avg Edge", "Avg Entry"],
+        [
+            [
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(_fmt_num(item.get("closed", 0))),
+                html.escape(
+                    f"{100.0 * (float(item.get('wins', 0) or 0.0) / float(item.get('closed', 0) or 1.0)):.1f}%"
+                ),
+                html.escape(_fmt_money(item.get("net_pnl", 0.0))),
+                html.escape(_fmt_money(item.get("avg_pnl", 0.0))),
+                html.escape(f"{float(item.get('avg_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('avg_entry', 0.0)):.4f}"),
+            ]
+            for item in cex_latency_paper.get("pnl_by_asset_side", [])
+            if isinstance(item, dict)
+        ],
+    )
+    cex_latency_exit_reason_pnl_table = _table(
+        ["Exit Reason", "Closed", "Win Rate", "Net PnL", "Avg PnL"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("closed", 0))),
+                html.escape(
+                    f"{100.0 * (float(item.get('wins', 0) or 0.0) / float(item.get('closed', 0) or 1.0)):.1f}%"
+                ),
+                html.escape(_fmt_money(item.get("net_pnl", 0.0))),
+                html.escape(_fmt_money(item.get("avg_pnl", 0.0))),
+            ]
+            for item in cex_latency_paper.get("pnl_by_exit_reason", [])
+            if isinstance(item, dict)
+        ],
+    )
+    cex_latency_price_band_pnl_table = _table(
+        ["Entry Price Band", "Closed", "Win Rate", "Net PnL", "Avg PnL", "Avg Edge"],
+        [
+            [
+                html.escape(str(item.get("band", ""))),
+                html.escape(_fmt_num(item.get("closed", 0))),
+                html.escape(
+                    f"{100.0 * (float(item.get('wins', 0) or 0.0) / float(item.get('closed', 0) or 1.0)):.1f}%"
+                ),
+                html.escape(_fmt_money(item.get("net_pnl", 0.0))),
+                html.escape(_fmt_money(item.get("avg_pnl", 0.0))),
+                html.escape(f"{float(item.get('avg_edge', 0.0)):.4f}"),
+            ]
+            for item in cex_latency_paper.get("pnl_by_price_band", [])
+            if isinstance(item, dict)
+        ],
+    )
+    cex_latency_edge_band_pnl_table = _table(
+        ["Entry Edge Band", "Closed", "Win Rate", "Net PnL", "Avg PnL", "Avg Entry"],
+        [
+            [
+                html.escape(str(item.get("band", ""))),
+                html.escape(_fmt_num(item.get("closed", 0))),
+                html.escape(
+                    f"{100.0 * (float(item.get('wins', 0) or 0.0) / float(item.get('closed', 0) or 1.0)):.1f}%"
+                ),
+                html.escape(_fmt_money(item.get("net_pnl", 0.0))),
+                html.escape(_fmt_money(item.get("avg_pnl", 0.0))),
+                html.escape(f"{float(item.get('avg_entry', 0.0)):.4f}"),
+            ]
+            for item in cex_latency_paper.get("pnl_by_edge_band", [])
+            if isinstance(item, dict)
+        ],
+    )
+    cex_latency_entry_block_table = _table(
+        ["Market", "Reason"],
+        [
+            [
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in cex_latency_execution.get("entry_blocks", [])
+            if isinstance(item, dict)
+        ],
+    )
     complete_set_summary = complete_set_arb_stats.get("summary", {}) if isinstance(complete_set_arb_stats.get("summary"), dict) else {}
     complete_set_execution_result = last_cycle_result.get("complete_set_arb", {}) if isinstance(last_cycle_result.get("complete_set_arb"), dict) else {}
     complete_set_execution = complete_set_execution_result.get("execution", {}) if isinstance(complete_set_execution_result.get("execution"), dict) else {}
@@ -1018,6 +1372,150 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
             for item in realistic_complete_set_arb.get("reason_breakdown", [])
         ],
     )
+    preowned_inventory_summary = (
+        preowned_inventory_arb.get("summary", {})
+        if isinstance(preowned_inventory_arb.get("summary"), dict)
+        else {}
+    )
+    preowned_inventory_summary_rows = [
+        ["Mode", html.escape(str(preowned_inventory_summary.get("mode", "Research-only pre-owned inventory complete-set arb simulation")))],
+        ["Enabled", html.escape(str(bool(preowned_inventory_summary.get("enabled"))).lower())],
+        ["Tick Poll Source", html.escape(str(preowned_inventory_summary.get("tick_poll_source", "")))],
+        ["Lookback Hours", html.escape(_fmt_num(preowned_inventory_summary.get("lookback_hours", 0)))],
+        ["Ticks Replayed", html.escape(_fmt_num(preowned_inventory_summary.get("ticks_replayed", 0)))],
+        ["First Tick (CT)", html.escape(_fmt_ts(preowned_inventory_summary.get("first_tick_ts")))],
+        ["Last Tick (CT)", html.escape(_fmt_ts(preowned_inventory_summary.get("last_tick_ts")))],
+        ["Simulated Capital", html.escape(_fmt_money(preowned_inventory_summary.get("simulated_capital_usdc", 0.0)))],
+        ["Target Notional / Set", html.escape(_fmt_money(preowned_inventory_summary.get("target_notional_usdc", 0.0)))],
+        ["Seed Side Notional", html.escape(_fmt_money(preowned_inventory_summary.get("seed_side_notional_usdc", 0.0)))],
+        ["Seed Max Complete-Set Cost", html.escape(f"{float(preowned_inventory_summary.get('seed_max_complete_set_cost', 0.0)):.4f}")],
+        ["Seed Min Seconds Left", html.escape(f"{_fmt_num(preowned_inventory_summary.get('seed_min_seconds_left', 0))}s")],
+        ["Seed Max Seconds Left", html.escape(f"{_fmt_num(preowned_inventory_summary.get('seed_max_seconds_left', 0))}s")],
+        ["Seed Min Depth", html.escape(_fmt_money(preowned_inventory_summary.get("seed_min_depth_usdc", 0.0)))],
+        ["Seed Requires Original Eligibility", html.escape(str(bool(preowned_inventory_summary.get("seed_require_original_eligible"))).lower())],
+        ["Max Open Seeded Markets", html.escape(_fmt_num(preowned_inventory_summary.get("max_open_seeded_markets", 0)))],
+        ["Per-Asset Time-Bucket Seed Cap", html.escape(_fmt_num(preowned_inventory_summary.get("per_asset_time_bucket_cap", 0)))],
+        ["Time Bucket", html.escape(f"{_fmt_num(preowned_inventory_summary.get('time_bucket_seconds', 0))}s")],
+        ["Seeded Markets", html.escape(_fmt_num(preowned_inventory_summary.get("seeded_markets", 0)))],
+        ["Seed-to-Set Conversion Rate", html.escape(f"{100.0 * float(preowned_inventory_summary.get('seed_to_set_conversion_rate', 0.0)):.1f}%")],
+        ["Profit Explanation", html.escape(str(preowned_inventory_summary.get("profit_explanation", "")))],
+        ["Seed Spend", html.escape(_fmt_money(preowned_inventory_summary.get("seed_spend_usdc", 0.0)))],
+        ["Expired Inventory Cost", html.escape(_fmt_money(preowned_inventory_summary.get("expired_inventory_cost_usdc", 0.0)))],
+        ["Expired Inventory Guaranteed Payout", html.escape(_fmt_money(preowned_inventory_summary.get("expired_inventory_guaranteed_payout_usdc", 0.0)))],
+        ["Expired Inventory Conservative PnL", html.escape(_fmt_money(preowned_inventory_summary.get("expired_inventory_conservative_pnl_usdc", 0.0)))],
+        ["Unused Inventory Cost", html.escape(_fmt_money(preowned_inventory_summary.get("unused_inventory_cost_usdc", 0.0)))],
+        ["Unused Inventory Guaranteed Payout", html.escape(_fmt_money(preowned_inventory_summary.get("unused_inventory_guaranteed_payout_usdc", 0.0)))],
+        ["Unused Inventory Conservative Mark", html.escape(_fmt_money(preowned_inventory_summary.get("unused_inventory_conservative_pnl_usdc", 0.0)))],
+        ["Unused Inventory Shares", html.escape(f"{float(preowned_inventory_summary.get('unused_inventory_shares', 0.0)):.4f}")],
+        ["Consumed Inventory Cost", html.escape(_fmt_money(preowned_inventory_summary.get("consumed_inventory_cost_usdc", 0.0)))],
+        ["Live Buy-Leg Spend", html.escape(_fmt_money(preowned_inventory_summary.get("live_buy_leg_spend_usdc", 0.0)))],
+        ["Current Locked Capital", html.escape(_fmt_money(preowned_inventory_summary.get("current_locked_capital_usdc", 0.0)))],
+        ["Peak Locked Capital", html.escape(_fmt_money(preowned_inventory_summary.get("peak_locked_capital_usdc", 0.0)))],
+        ["Peak Capital Fraction", html.escape(f"{100.0 * float(preowned_inventory_summary.get('peak_capital_fraction', 0.0)):.1f}%")],
+        ["Inventory-Paired Sets", html.escape(_fmt_num(preowned_inventory_summary.get("inventory_sets", 0)))],
+        ["Unique Markets", html.escape(_fmt_num(preowned_inventory_summary.get("unique_markets", 0)))],
+        ["Inventory-Blocked Ticks", html.escape(_fmt_num(preowned_inventory_summary.get("inventory_blocked", 0)))],
+        ["Capital-Blocked Ticks", html.escape(_fmt_num(preowned_inventory_summary.get("capital_blocked", 0)))],
+        ["Depth-Blocked Ticks", html.escape(_fmt_num(preowned_inventory_summary.get("depth_blocked", 0)))],
+        ["Original Skips", html.escape(_fmt_num(preowned_inventory_summary.get("original_skips", 0)))],
+        ["Completed-Pair Gross PnL", html.escape(_fmt_money(preowned_inventory_summary.get("completed_set_gross_pnl_usdc", 0.0)))],
+        ["Wallet-Adjusted Net PnL", html.escape(_fmt_money(preowned_inventory_summary.get("net_pnl", 0.0)))],
+        ["Marked Net PnL incl. Open Inventory", html.escape(_fmt_money(preowned_inventory_summary.get("marked_net_pnl", preowned_inventory_summary.get("net_pnl", 0.0))))],
+        ["24h Net Revenue", html.escape(_fmt_money(preowned_inventory_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(preowned_inventory_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(preowned_inventory_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Avg Gross PnL / Inventory Set", html.escape(_fmt_money(preowned_inventory_summary.get("avg_pnl_per_inventory_set", 0.0)))],
+        ["Avg Wallet Net PnL / Inventory Set", html.escape(_fmt_money(preowned_inventory_summary.get("avg_net_pnl_per_inventory_set", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(preowned_inventory_summary.get("max_drawdown", 0.0)))],
+        ["Signals 60m", html.escape(_fmt_num(preowned_inventory_summary.get("signals_60m", 0)))],
+        ["Eligible 60m", html.escape(_fmt_num(preowned_inventory_summary.get("eligible_60m", 0)))],
+        ["Eligible Rate 60m", html.escape(f"{100.0 * float(preowned_inventory_summary.get('eligible_rate_60m', 0.0)):.1f}%")],
+        ["Best Inventory Edge 60m", html.escape(f"{float(preowned_inventory_summary.get('best_inventory_edge_60m', 0.0)):.4f}")],
+        ["Min Edge / Share", html.escape(f"{float(preowned_inventory_summary.get('min_edge_per_share', 0.0)):.4f}")],
+        ["Min Seconds Left", html.escape(f"{_fmt_num(preowned_inventory_summary.get('min_seconds_left', 0))}s")],
+        ["Min Depth", html.escape(_fmt_money(preowned_inventory_summary.get("min_depth_usdc", 0.0)))],
+        ["Same-Market Cooldown", html.escape(f"{_fmt_num(preowned_inventory_summary.get('same_market_cooldown_seconds', 0))}s")],
+        ["Depth Haircut", html.escape(f"{100.0 * float(preowned_inventory_summary.get('depth_haircut', 0.0)):.1f}%")],
+        ["Extra Slippage / Share", html.escape(f"{float(preowned_inventory_summary.get('extra_slippage_per_share', 0.0)):.4f}")],
+        ["Redeem Lag", html.escape(f"{_fmt_num(preowned_inventory_summary.get('redeem_lag_seconds', 0))}s")],
+    ]
+    preowned_inventory_event_table = _table(
+        ["Time (CT)", "Market", "Asset", "Decision", "Reason", "Buy Side", "Inventory Side", "Cost", "Inv Edge", "Shares", "Buy Spend", "Inventory Cost", "PnL", "Locked Capital"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("decision", ""))),
+                html.escape(str(item.get("reason", ""))),
+                html.escape(str(item.get("side_bought", "")).upper()),
+                html.escape(str(item.get("inventory_side", "")).upper()),
+                html.escape(f"{float(item.get('total_cost') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('inventory_edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('shares') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("buy_spend_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("inventory_cost_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("pnl", 0.0))),
+                html.escape(_fmt_money(item.get("locked_capital_usdc", 0.0))),
+            ]
+            for item in preowned_inventory_arb.get("recent_events", [])
+        ],
+    )
+    preowned_inventory_reason_table = _table(
+        ["Reason", "Count", "Max Inventory Edge"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_inventory_edge', 0.0)):.4f}"),
+            ]
+            for item in preowned_inventory_arb.get("reason_breakdown", [])
+        ],
+    )
+    account_reconciliation_summary = (
+        polymarket_account_reconciliation.get("summary", {})
+        if isinstance(polymarket_account_reconciliation.get("summary"), dict)
+        else {}
+    )
+    account_reconciliation_summary_rows = [
+        ["Mode", html.escape(str(account_reconciliation_summary.get("mode", "Polymarket account reconciliation")))],
+        ["Source", html.escape(str(account_reconciliation_summary.get("source", "")))],
+        ["Status", html.escape(str(account_reconciliation_summary.get("status", "")))],
+        ["Error", html.escape(str(account_reconciliation_summary.get("error", "")) or "-")],
+        ["Last Checked (CT)", html.escape(_fmt_ts(account_reconciliation_summary.get("last_checked_ts")))],
+        ["Funder Address", html.escape(str(account_reconciliation_summary.get("funder_address", "")))],
+        ["CLOB Cash / Collateral Balance", html.escape(_fmt_money(account_reconciliation_summary.get("clob_cash_usdc", 0.0)))],
+        ["Pilot Starting Capital", html.escape(_fmt_money(account_reconciliation_summary.get("pilot_starting_capital_usdc", 0.0)))],
+        ["Cash - Pilot Starting Capital", html.escape(_fmt_money(account_reconciliation_summary.get("cash_minus_pilot_capital_usdc", 0.0)))],
+        ["CLOB Open Orders", html.escape(_fmt_num(account_reconciliation_summary.get("clob_open_orders", 0)))],
+        ["Recent CLOB Trades Fetched", html.escape(_fmt_num(account_reconciliation_summary.get("clob_recent_trades", 0)))],
+        ["Recent BUY Spend", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_buy_spend_usdc", 0.0)))],
+        ["Recent SELL Proceeds", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_sell_proceeds_usdc", 0.0)))],
+        ["Recent Net Trade Cashflow", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_net_trade_cashflow_usdc", 0.0)))],
+        ["Local Live Attempt Rows With Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("local_live_attempt_rows", 0)))],
+        ["Local Order IDs Recorded", html.escape(_fmt_num(account_reconciliation_summary.get("local_order_ids_recorded", 0)))],
+        ["CLOB Trades Matching Local Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("clob_trades_matching_local_order_ids", 0)))],
+        ["CLOB Trades Not In Local Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("clob_trades_not_in_local_order_ids", 0)))],
+        ["Note", html.escape(str(account_reconciliation_summary.get("note", "")))],
+    ]
+    account_reconciliation_trade_table = _table(
+        ["Time (CT)", "Outcome", "Side", "Size", "Price", "Cash Amount", "Status", "Local Order?", "Order ID", "Tx"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("outcome", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('size') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('price') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("cash_amount_usdc", 0.0))),
+                html.escape(str(item.get("status", ""))),
+                html.escape("yes" if bool(item.get("matched_local_order")) else "no"),
+                html.escape((str(item.get("order_id", ""))[:10] + "..." + str(item.get("order_id", ""))[-6:]) if len(str(item.get("order_id", ""))) > 20 else str(item.get("order_id", ""))),
+                html.escape((str(item.get("transaction_hash", ""))[:10] + "..." + str(item.get("transaction_hash", ""))[-6:]) if len(str(item.get("transaction_hash", ""))) > 20 else str(item.get("transaction_hash", ""))),
+            ]
+            for item in polymarket_account_reconciliation.get("recent_trades", [])
+        ],
+    )
     live_complete_set_arb_pilot = state.get("live_complete_set_arb_pilot", {}) if isinstance(state.get("live_complete_set_arb_pilot"), dict) else {}
     live_complete_set_pilot_summary = (
         live_complete_set_arb_pilot.get("summary", {})
@@ -1026,6 +1524,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     )
     live_complete_set_pilot_summary_rows = [
         ["Mode", html.escape(str(live_complete_set_pilot_summary.get("mode", "Guarded live complete-set arb pilot")))],
+        ["Accounting Basis", html.escape(str(live_complete_set_pilot_summary.get("accounting_basis", "local matched-leg reconstruction; not Polymarket wallet/account cash")))],
         ["Enabled", html.escape(str(bool(live_complete_set_pilot_summary.get("enabled"))).lower())],
         ["Pilot Mode", html.escape(str(live_complete_set_pilot_summary.get("pilot_mode", "dry_run")))],
         ["Armed For Live Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("armed_for_live_orders"))).lower())],
@@ -1034,17 +1533,39 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Pilot Capital", html.escape(_fmt_money(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", 0.0)))],
         ["Target Notional / Set", html.escape(_fmt_money(live_complete_set_pilot_summary.get("target_notional_usdc", 0.0)))],
         ["Submitted Sets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("submitted_sets", 0)))],
+        ["Actual Locked Complete Sets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("actual_locked_complete_sets", 0)))],
+        ["Directional Exposure Warning", html.escape(str(live_complete_set_pilot_summary.get("directional_exposure_warning", "no")))],
         ["Dry-Run Candidates", html.escape(_fmt_num(live_complete_set_pilot_summary.get("dry_run_candidates", 0)))],
         ["Blocked Attempts", html.escape(_fmt_num(live_complete_set_pilot_summary.get("blocked_attempts", 0)))],
         ["Failed Attempts", html.escape(_fmt_num(live_complete_set_pilot_summary.get("failed_attempts", 0)))],
+        ["Matched Live Legs", html.escape(_fmt_num(live_complete_set_pilot_summary.get("matched_live_legs", 0)))],
+        ["Resolved Matched Live Legs", html.escape(_fmt_num(live_complete_set_pilot_summary.get("resolved_matched_live_legs", 0)))],
+        ["Unresolved Matched Live Legs", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unresolved_matched_live_legs", 0)))],
+        ["Matched Leg Total Spend", html.escape(_fmt_money(live_complete_set_pilot_summary.get("matched_live_leg_spend_usdc", 0.0)))],
+        ["Resolved Matched Leg Payout", html.escape(_fmt_money(live_complete_set_pilot_summary.get("resolved_matched_live_leg_payout_usdc", 0.0)))],
+        ["Resolved Matched Leg PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("resolved_matched_live_leg_pnl_usdc", 0.0)))],
+        ["Unresolved Matched Leg Spend", html.escape(_fmt_money(live_complete_set_pilot_summary.get("unresolved_matched_live_leg_spend_usdc", 0.0)))],
+        ["Unresolved Matched Leg Markets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unresolved_matched_live_leg_markets", 0)))],
+        ["Matched Leg Resolution Source", html.escape(str(live_complete_set_pilot_summary.get("matched_leg_resolution_source", "")))],
+        ["Matched Leg Resolution Errors", html.escape(_fmt_num(live_complete_set_pilot_summary.get("matched_leg_resolution_errors", 0)))],
+        ["One-Leg Failures", html.escape(_fmt_num(live_complete_set_pilot_summary.get("one_leg_failures", 0)))],
+        ["Resolved One-Leg Failures", html.escape(_fmt_num(live_complete_set_pilot_summary.get("resolved_one_leg_failures", 0)))],
+        ["Unresolved One-Leg Failures", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unresolved_one_leg_failures", 0)))],
+        ["One-Leg Total Spend", html.escape(_fmt_money(live_complete_set_pilot_summary.get("one_leg_spend_usdc", 0.0)))],
+        ["Resolved One-Leg Payout", html.escape(_fmt_money(live_complete_set_pilot_summary.get("resolved_one_leg_payout_usdc", 0.0)))],
+        ["Resolved One-Leg PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("resolved_one_leg_pnl_usdc", 0.0)))],
+        ["Unresolved One-Leg Spend", html.escape(_fmt_money(live_complete_set_pilot_summary.get("unresolved_one_leg_spend_usdc", 0.0)))],
+        ["Unresolved One-Leg Markets", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unresolved_one_leg_markets", 0)))],
+        ["One-Leg Resolution Source", html.escape(str(live_complete_set_pilot_summary.get("one_leg_resolution_source", "")))],
+        ["One-Leg Resolution Errors", html.escape(_fmt_num(live_complete_set_pilot_summary.get("one_leg_resolution_errors", 0)))],
         ["Unique Markets Submitted", html.escape(_fmt_num(live_complete_set_pilot_summary.get("unique_markets_submitted", 0)))],
         ["Expected Locked PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("expected_locked_pnl_usdc", 0.0)))],
         ["Dry-Run Candidate PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("dry_run_candidate_pnl_usdc", 0.0)))],
-        ["Net PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("net_pnl", 0.0)))],
-        ["24h Net Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Local Matched-Leg PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("net_pnl", 0.0)))],
+        ["24h Local Matched-Leg PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("realized_pnl_24h_usdc", 0.0)))],
         ["24h Candidate PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("expected_candidate_pnl_24h_usdc", 0.0)))],
-        ["Projected Monthly Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_monthly_revenue_usdc", 0.0)))],
-        ["Projected Yearly Revenue", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Projected Monthly Local PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Local PnL", html.escape(_fmt_money(live_complete_set_pilot_summary.get("projected_yearly_revenue_usdc", 0.0)))],
         ["Max Drawdown", html.escape(_fmt_money(live_complete_set_pilot_summary.get("max_drawdown", 0.0)))],
         ["Attempts 60m", html.escape(_fmt_num(live_complete_set_pilot_summary.get("attempts_60m", 0)))],
         ["Eligible 60m", html.escape(_fmt_num(live_complete_set_pilot_summary.get("eligible_60m", 0)))],
@@ -1052,6 +1573,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Best Adjusted Edge 60m", html.escape(f"{float(live_complete_set_pilot_summary.get('best_adjusted_edge_60m', 0.0)):.4f}")],
         ["Min Edge / Share", html.escape(f"{float(live_complete_set_pilot_summary.get('min_edge_per_share', 0.0)):.4f}")],
         ["Min Depth", html.escape(_fmt_money(live_complete_set_pilot_summary.get("min_depth_usdc", 0.0)))],
+        ["Min Seconds Left", html.escape(f"{_fmt_num(live_complete_set_pilot_summary.get('min_seconds_left', 0))}s")],
+        ["Min Leg Amount", html.escape(_fmt_money(live_complete_set_pilot_summary.get("min_leg_amount_usdc", 0.0)))],
         ["Depth Haircut", html.escape(f"{100.0 * float(live_complete_set_pilot_summary.get('depth_haircut', 0.0)):.1f}%")],
         ["Extra Slippage / Share", html.escape(f"{float(live_complete_set_pilot_summary.get('extra_slippage_per_share', 0.0)):.4f}")],
         ["Max Sets / Cycle", html.escape(_fmt_num(live_complete_set_pilot_summary.get("max_sets_per_cycle", 0)))],
@@ -1059,6 +1582,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Daily Loss Limit", html.escape(_fmt_money(live_complete_set_pilot_summary.get("daily_loss_limit_usdc", 0.0)))],
         ["Allow Sequential Orders", html.escape(str(bool(live_complete_set_pilot_summary.get("allow_sequential_orders"))).lower())],
         ["Require FOK", html.escape(str(bool(live_complete_set_pilot_summary.get("require_fok"))).lower())],
+        ["Rescue Enabled", html.escape(str(bool(live_complete_set_pilot_summary.get("rescue_enabled"))).lower())],
         ["Signature Type", html.escape(_fmt_num(live_complete_set_pilot_summary.get("signature_type", 0)))],
         ["CLOB Host", html.escape(str(live_complete_set_pilot_summary.get("host", "")))],
         ["Same-Market Cooldown", html.escape(f"{_fmt_num(live_complete_set_pilot_summary.get('same_market_cooldown_seconds', 0))}s")],
@@ -1084,6 +1608,26 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 html.escape(str(item.get("error", ""))[:160]),
             ]
             for item in live_complete_set_arb_pilot.get("recent_attempts", [])
+        ],
+    )
+    live_complete_set_pilot_matched_leg_table = _table(
+        ["Time (CT)", "Market", "Asset", "Attempt", "Side Held", "Winner", "Status", "Spend", "Shares", "Payout", "PnL", "Question"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("decision", ""))),
+                html.escape(str(item.get("side", ""))).upper(),
+                html.escape(str(item.get("winner", ""))).upper(),
+                html.escape(str(item.get("status", ""))),
+                html.escape(_fmt_money(item.get("entry_spend_usdc", 0.0))),
+                html.escape(f"{float(item.get('shares') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("payout_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("pnl_usdc", 0.0))),
+                html.escape(str(item.get("question", ""))[:120]),
+            ]
+            for item in live_complete_set_arb_pilot.get("matched_leg_reconciliation", [])
         ],
     )
     live_complete_set_pilot_reason_table = _table(
@@ -1750,7 +2294,12 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
   <div class="meta">
     <strong>Page Updated:</strong> {html.escape(page_generated_at)} |
     <strong>Last Cycle Completed:</strong> {html.escape(last_cycle_completed)} |
-    <strong>Auto-Refresh:</strong> every 10s
+    <strong>Auto-Refresh:</strong> every 10s |
+    <strong>Mode:</strong> {html.escape("live-fast" if fast_mode else "full-research")} |
+    <strong>Cache:</strong> {html.escape("hit" if served_from_cache else "fresh")}
+  </div>
+  <div class="meta">
+    {"Live-fast mode skips heavy research panes so real-money pilot status refreshes quickly. Open <a href='?mode=full'>full research mode</a> only when you need the historical simulations." if fast_mode else "Full research mode recomputes historical simulations and can take over a minute. Open <a href='?mode=fast'>live-fast mode</a> for monitoring."}
   </div>
   <div class="grid">
     <div class="panel"><h2>Status</h2>{_table(["Metric", "Value"], rows)}</div>
@@ -1768,6 +2317,36 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     <h2>Live Paper Strategy PnL Curves</h2>
     <div class="sub">One curve per enabled promoted/live-paper strategy. The promoted set is the current top raw-PnL strategy basket, and these are the curves to compare when deciding what performs best live.</div>
     {_render_variant_equity_curves(live_strategy_equity_curves, bankroll_usdc)}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>CEX Latency Paper Bot</h2>
+    <div class="sub">Separate $1,000 paper-only directional bot. It gathers Gamma markets, Polymarket CLOB YES/NO books, and Binance prices; entries/exits use book-level VWAP at target notional when available. It does not assume atomic YES+NO arbitrage.</div>
+    {_table(["Metric", "Value"], cex_latency_summary_rows)}
+    <h3>CEX Latency Paper PnL Curve</h3>
+    {_render_equity_curve(cex_latency_paper.get("equity_curve", []) if isinstance(cex_latency_paper.get("equity_curve"), list) else [], float(cex_latency_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>CEX Edge-Floor Sensitivity</h3>
+    <div class="sub">Last 24h of recorded CEX signals. Raw ticks are signal observations; unique markets keeps only the best tick per market. Indicative edge dollars are model edge at target notional, not realized PnL.</div>
+    {cex_latency_threshold_table}
+    <h3>CEX Realized PnL Breakdown</h3>
+    <div class="sub">Closed paper trades only. These tables show why the directional CEX paper bot is making or losing money.</div>
+    <h4>By Asset / Side</h4>
+    {cex_latency_asset_side_table}
+    <h4>By Exit Reason</h4>
+    {cex_latency_exit_reason_pnl_table}
+    <h4>By Entry Price Band</h4>
+    {cex_latency_price_band_pnl_table}
+    <h4>By Entry Edge Band</h4>
+    {cex_latency_edge_band_pnl_table}
+    <h3>Open CEX Latency Paper Positions</h3>
+    {cex_latency_open_table}
+    <h3>Recent CEX Latency Paper Closes</h3>
+    {cex_latency_close_table}
+    <h3>Recent CEX Latency Paper Signals</h3>
+    {cex_latency_signal_table}
+    <h3>CEX Latency Skip Reasons</h3>
+    {cex_latency_reason_table}
+    <h3>Last Cycle Entry Blocks</h3>
+    {cex_latency_entry_block_table}
   </div>
   <div class="panel" style="margin-top:16px;">
     <h2>Complete-Set Arb Prototype</h2>
@@ -1796,13 +2375,33 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {realistic_complete_set_reason_table}
   </div>
   <div class="panel" style="margin-top:16px;">
+    <h2>Pre-Owned Inventory Arb Paper Simulation</h2>
+    <div class="sub">Research-only paper replay for an inventory-backed arb. It seeds small YES and NO buffers, then counts an arb only when one live buy can pair against already-owned opposite inventory. This avoids pretending paired FOK is atomic, but exposes how much capital gets trapped in unused inventory.</div>
+    {_table(["Metric", "Value"], preowned_inventory_summary_rows)}
+    <h3>Inventory PnL Curve</h3>
+    {_render_equity_curve(preowned_inventory_arb.get("equity_curve", []) if isinstance(preowned_inventory_arb.get("equity_curve"), list) else [], float(preowned_inventory_summary.get("simulated_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Recent Inventory Sim Events</h3>
+    {preowned_inventory_event_table}
+    <h3>Inventory Skip / Block Reasons</h3>
+    {preowned_inventory_reason_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>Polymarket Account Reconciliation</h2>
+    <div class="sub">Authoritative CLOB account probe for the live wallet. Use this pane to compare Polymarket cash and real CLOB trades against the local bot ledger. Polymarket UI P/L is still an exchange-side display and may include timing/settlement effects not present in local reconstruction.</div>
+    {_table(["Metric", "Value"], account_reconciliation_summary_rows)}
+    <h3>Recent CLOB Account Trades</h3>
+    {account_reconciliation_trade_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
     <h2>Live Complete-Set Arb Pilot</h2>
-    <div class="sub">Separate guarded live-pilot tracker for the $50 Polymarket test bankroll. Dry-run candidates, safety blocks, submitted paired attempts, and failures are isolated from all paper/research bot metrics.</div>
+    <div class="sub">Separate guarded live-pilot tracker for the $50 Polymarket test bankroll. This pane is local ledger reconstruction only; Polymarket account cash/P&amp;L is authoritative. If Actual Locked Complete Sets is 0 and Matched Live Legs is positive, the fills were directional one-leg exposures, not locked YES+NO arbitrage.</div>
     {_table(["Metric", "Value"], live_complete_set_pilot_summary_rows)}
-    <h3>Live Pilot PnL Curve</h3>
+    <h3>Local Matched-Leg PnL Curve (Not Account Value)</h3>
     {_render_equity_curve(live_complete_set_arb_pilot.get("equity_curve", []) if isinstance(live_complete_set_arb_pilot.get("equity_curve"), list) else [], float(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", bankroll_usdc) or bankroll_usdc))}
     <h3>Recent Live Pilot Attempts</h3>
     {live_complete_set_pilot_attempt_table}
+    <h3>Matched Live-Leg Reconciliation</h3>
+    {live_complete_set_pilot_matched_leg_table}
     <h3>Live Pilot Blocks / Failures</h3>
     {live_complete_set_pilot_reason_table}
   </div>
@@ -2056,7 +2655,12 @@ def serve_latency_bot_dashboard(settings: LatencyBotSettings, host: str, port: i
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            state = build_latency_bot_dashboard_state(settings)
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            requested_mode = str((query.get("mode") or [""])[0]).strip().lower()
+            env_fast = str(os.getenv("LATENCY_BOT_DASHBOARD_FAST", "1")).strip().lower() not in {"0", "false", "no"}
+            fast = requested_mode != "full" if requested_mode else env_fast
+            state = build_latency_bot_dashboard_state(settings, fast=fast)
             body = render_latency_bot_dashboard_html(state).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
