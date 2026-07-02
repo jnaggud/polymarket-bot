@@ -604,18 +604,18 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
             cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
         )
     )
-    equity_curve = latency_bot_equity_curve(settings)
+    equity_curve = [] if fast else latency_bot_equity_curve(settings)
     live_strategy_equity_curves = [] if fast else latency_bot_live_strategy_equity_curves(settings)
     shadow_stats = {} if fast else latency_bot_shadow_performance_stats(settings)
     complete_set_arb_stats = {} if fast else latency_bot_complete_set_arb_stats(settings)
-    cex_latency_paper = latency_bot_cex_latency_paper_stats(settings)
-    btc_fair_value_paper = latency_bot_btc_fair_value_paper_stats(settings)
+    cex_latency_paper = {} if fast else latency_bot_cex_latency_paper_stats(settings)
+    btc_fair_value_paper = {} if fast else latency_bot_btc_fair_value_paper_stats(settings)
     temporal_inventory_maker_paper = latency_bot_temporal_inventory_maker_paper_stats(settings)
     live_temporal_inventory_maker = latency_bot_live_temporal_inventory_maker_stats(settings)
     late_resolution_capture_paper = latency_bot_late_resolution_capture_paper_stats(settings)
-    wallet_teacher_sniper = latency_bot_wallet_teacher_sniper_stats(settings)
+    wallet_teacher_sniper = {} if fast else latency_bot_wallet_teacher_sniper_stats(settings)
     realistic_complete_set_arb = {} if fast else latency_bot_realistic_complete_set_arb_sim(settings)
-    preowned_inventory_arb = latency_bot_preowned_inventory_arb_sim(settings)
+    preowned_inventory_arb = {} if fast else latency_bot_preowned_inventory_arb_sim(settings)
     realistic_complete_set_arb_all_time = (
         {}
         if fast
@@ -623,7 +623,7 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
             replace(settings, realistic_complete_set_arb_lookback_hours=24 * 365 * 20)
         )
     )
-    live_complete_set_arb_pilot = latency_bot_live_complete_set_arb_pilot_stats(settings)
+    live_complete_set_arb_pilot = {} if fast else latency_bot_live_complete_set_arb_pilot_stats(settings)
     polymarket_account_reconciliation = (
         {} if fast else latency_bot_polymarket_account_reconciliation(settings)
     )
@@ -1340,6 +1340,17 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
             for item in late_resolution_capture_paper.get("reason_breakdown", [])
         ],
     )
+    current_strategy_rows = [
+        ["Iteration", html.escape("Temporal inventory maker + guarded live maker + separate late-resolution paper")],
+        ["Primary Paper Bot", html.escape(f"{'enabled' if bool(temporal_inventory_summary.get('enabled')) else 'disabled'} | equity {_fmt_money(temporal_inventory_summary.get('equity_usdc', 0.0))} | marked PnL {_fmt_money(temporal_inventory_summary.get('marked_pnl_usdc', 0.0))}")],
+        ["Paper Quotes", html.escape(f"open {_fmt_num(temporal_inventory_summary.get('quote_open', 0))} | filled {_fmt_num(temporal_inventory_summary.get('quote_filled', 0))} | fill rate {100.0 * float(temporal_inventory_summary.get('quote_fill_rate', 0.0)):.1f}%")],
+        ["Live Maker Gate", html.escape(f"{'enabled' if bool(live_temporal_summary.get('enabled')) else 'disabled'} | mode {live_temporal_summary.get('pilot_mode', 'dry_run')} | armed {str(bool(live_temporal_summary.get('armed_for_live_orders'))).lower()}")],
+        ["Live Maker Orders", html.escape(f"local open {_fmt_num(live_temporal_summary.get('open_orders', 0))} | 24h dry-run {_fmt_num(live_temporal_summary.get('dry_run_24h', 0))} | 24h submitted {_fmt_num(live_temporal_summary.get('submitted_24h', 0))} | 24h blocked {_fmt_num(live_temporal_summary.get('blocked_24h', 0))}")],
+        ["Live Heartbeat", html.escape(f"{live_temporal_summary.get('last_heartbeat_status', '-') or '-'} | {live_temporal_summary.get('last_heartbeat_reason', '-') or '-'}")],
+        ["Late Resolution Module", html.escape(f"{'enabled' if bool(late_resolution_summary.get('enabled')) else 'disabled'} | open {_fmt_num(late_resolution_summary.get('open', 0))} | net PnL {_fmt_money(late_resolution_summary.get('net_pnl', 0.0))} | eligible 60m {_fmt_num(late_resolution_summary.get('eligible_60m', 0))}")],
+        ["Last Cycle Live Maker", html.escape(f"submitted {_fmt_num(live_temporal_execution.get('submitted_count', 0))} | dry-run {_fmt_num(live_temporal_execution.get('dry_run_count', 0))} | blocked {_fmt_num(live_temporal_execution.get('blocked_count', 0))} | cancelled {_fmt_num(live_temporal_execution.get('cancelled_count', 0))}")],
+        ["Last Cycle Late Resolution", html.escape(f"opened {_fmt_num(late_resolution_execution.get('opened_positions_count', 0))} | closed {_fmt_num(late_resolution_execution.get('closed_positions_count', 0))} | blocks {_fmt_num(late_resolution_execution.get('entry_blocks_count', 0))}")],
+    ]
     cex_latency_summary_rows = [
         ["Mode", html.escape(str(cex_latency_summary.get("mode", "CEX-latency directional paper bot")))],
         ["Data Sources", html.escape(str(cex_latency_summary.get("data_sources", "")))],
@@ -2877,6 +2888,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     h1, h2 {{ margin: 0 0 12px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }}
     .panel {{ background: white; border: 1px solid #dbe4ee; border-radius: 14px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+    .current-strategy {{ border-color: #0f766e; box-shadow: 0 1px 8px rgba(15, 118, 110, 0.12); }}
     table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
     th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
     th {{ font-size: 12px; letter-spacing: 0.03em; text-transform: uppercase; color: #475569; }}
@@ -2913,6 +2925,11 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     <div class="panel"><h2>Database</h2>{_table(["Metric", "Value"], db_rows)}</div>
     <div class="panel"><h2>Latest Cycle</h2>{_table(["Metric", "Value"], latest_cycle_rows)}</div>
     <div class="panel"><h2>Notes</h2><ul>{notes_html}</ul></div>
+  </div>
+  <div class="panel current-strategy" style="margin-top:16px;">
+    <h2>Current Strategy Iteration</h2>
+    <div class="sub">This is the active paper-first maker system: temporal inventory accounting, guarded live maker shadow/live path, and isolated late-resolution capture paper module.</div>
+    {_table(["Metric", "Value"], current_strategy_rows)}
   </div>
   <div class="panel" style="margin-top:16px;">
     <h2>Live Paper PnL Curve</h2>
