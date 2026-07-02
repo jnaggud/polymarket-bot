@@ -371,6 +371,91 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS live_temporal_inventory_maker_orders (
+        local_order_id TEXT PRIMARY KEY,
+        ts_created TEXT NOT NULL,
+        ts_updated TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        side TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        notional_usdc REAL NOT NULL,
+        mode TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        status TEXT NOT NULL,
+        edge REAL NOT NULL,
+        reason TEXT NOT NULL,
+        clob_order_id TEXT,
+        order_payload TEXT,
+        cancel_payload TEXT,
+        error TEXT,
+        heartbeat_ts TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS live_temporal_inventory_maker_heartbeats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        status TEXT NOT NULL,
+        armed INTEGER NOT NULL,
+        open_orders INTEGER NOT NULL,
+        cancel_all_ok INTEGER NOT NULL,
+        reason TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS late_resolution_capture_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        side TEXT NOT NULL,
+        tenor_minutes INTEGER NOT NULL,
+        signal_type TEXT NOT NULL,
+        edge REAL NOT NULL,
+        order_price REAL NOT NULL,
+        fair_yes REAL NOT NULL,
+        fair_no REAL NOT NULL,
+        official_confidence REAL NOT NULL,
+        boundary_distance_bps REAL NOT NULL,
+        seconds_left REAL NOT NULL,
+        eligible INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        blocked_reason TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS late_resolution_capture_positions (
+        position_id TEXT PRIMARY KEY,
+        market_id TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        side TEXT NOT NULL,
+        entry_ts TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        size REAL NOT NULL,
+        notional_usdc REAL NOT NULL,
+        status TEXT NOT NULL,
+        entry_edge REAL,
+        entry_official_confidence REAL,
+        entry_boundary_distance_bps REAL,
+        entry_seconds_left REAL,
+        entry_reason TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS late_resolution_capture_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        position_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        mark REAL,
+        pnl REAL,
+        reason TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS shadow_variant_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT NOT NULL,
@@ -986,6 +1071,13 @@ def _ensure_query_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_events_market_ts ON temporal_inventory_events(market_id, ts)",
         "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_quotes_status ON temporal_inventory_quotes(status)",
         "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_quotes_market_ts ON temporal_inventory_quotes(market_id, ts_created)",
+        "CREATE INDEX IF NOT EXISTS idx_live_temporal_inventory_maker_orders_status ON live_temporal_inventory_maker_orders(status)",
+        "CREATE INDEX IF NOT EXISTS idx_live_temporal_inventory_maker_orders_market_ts ON live_temporal_inventory_maker_orders(market_id, ts_created)",
+        "CREATE INDEX IF NOT EXISTS idx_live_temporal_inventory_maker_heartbeats_ts ON live_temporal_inventory_maker_heartbeats(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_late_resolution_capture_signals_ts ON late_resolution_capture_signals(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_late_resolution_capture_signals_market_ts ON late_resolution_capture_signals(market_id, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_late_resolution_capture_positions_status ON late_resolution_capture_positions(status)",
+        "CREATE INDEX IF NOT EXISTS idx_late_resolution_capture_events_type_ts ON late_resolution_capture_events(event_type, ts)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_ts ON shadow_variant_signals(ts)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_variant ON shadow_variant_signals(variant_id)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_variant_reason ON shadow_variant_signals(variant_id, reason)",
@@ -1108,6 +1200,11 @@ def init_latency_bot_db(settings: LatencyBotSettings) -> dict[str, Any]:
             "temporal_inventory_markets",
             "temporal_inventory_events",
             "temporal_inventory_quotes",
+            "live_temporal_inventory_maker_orders",
+            "live_temporal_inventory_maker_heartbeats",
+            "late_resolution_capture_signals",
+            "late_resolution_capture_positions",
+            "late_resolution_capture_events",
         ],
     }
 
@@ -1399,6 +1496,41 @@ def append_cex_latency_paper_signals(settings: LatencyBotSettings, items: list[d
                     float(item.get("volatility") or 0.0),
                     str(item.get("reason") or ""),
                     1 if bool(item.get("eligible")) else 0,
+                    str(item.get("blocked_reason") or ""),
+                ),
+            )
+        conn.commit()
+
+
+def append_late_resolution_capture_signals(settings: LatencyBotSettings, items: list[dict[str, Any]], *, ts: str) -> None:
+    if not items:
+        return
+    with connect_latency_bot_db(settings) as conn:
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO late_resolution_capture_signals (
+                    ts, market_id, asset, side, tenor_minutes, signal_type, edge,
+                    order_price, fair_yes, fair_no, official_confidence,
+                    boundary_distance_bps, seconds_left, eligible, reason, blocked_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts,
+                    str(item.get("market_id") or ""),
+                    str(item.get("asset") or ""),
+                    str(item.get("side") or ""),
+                    int(item.get("tenor_minutes") or 0),
+                    str(item.get("signal_type") or "LATE_RESOLUTION_SKIP"),
+                    float(item.get("edge") or 0.0),
+                    float(item.get("order_price") or 0.0),
+                    float(item.get("fair_yes") or 0.0),
+                    float(item.get("fair_no") or 0.0),
+                    float(item.get("official_confidence") or 0.0),
+                    float(item.get("boundary_distance_bps") or 0.0),
+                    float(item.get("seconds_left") or 0.0),
+                    1 if bool(item.get("eligible")) else 0,
+                    str(item.get("reason") or ""),
                     str(item.get("blocked_reason") or ""),
                 ),
             )
@@ -2120,6 +2252,108 @@ def close_cex_latency_paper_position(
         conn.commit()
 
 
+def load_late_resolution_capture_open_positions(settings: LatencyBotSettings) -> list[dict[str, Any]]:
+    with connect_latency_bot_db(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM late_resolution_capture_positions
+            WHERE status = 'open'
+            ORDER BY entry_ts ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_late_resolution_capture_position(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    asset: str,
+    side: str,
+    entry_price: float,
+    size: float,
+    signal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    position_id = str(uuid.uuid4())
+    notional_usdc = round(float(entry_price) * float(size), 8)
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO late_resolution_capture_positions (
+                position_id, market_id, asset, side, entry_ts, entry_price, size,
+                notional_usdc, status, entry_edge, entry_official_confidence,
+                entry_boundary_distance_bps, entry_seconds_left, entry_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                position_id,
+                market_id,
+                asset,
+                side,
+                ts,
+                float(entry_price),
+                float(size),
+                notional_usdc,
+                "open",
+                float((signal or {}).get("edge") or 0.0),
+                float((signal or {}).get("official_confidence") or 0.0),
+                float((signal or {}).get("boundary_distance_bps") or 0.0),
+                float((signal or {}).get("seconds_left") or 0.0),
+                str((signal or {}).get("reason") or ""),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO late_resolution_capture_events (
+                ts, position_id, event_type, mark, pnl, reason
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, position_id, "open", float(entry_price), 0.0, "late_resolution_capture_entry"),
+        )
+        conn.commit()
+    return {
+        "position_id": position_id,
+        "market_id": market_id,
+        "asset": asset,
+        "side": side,
+        "entry_price": float(entry_price),
+        "size": float(size),
+        "notional_usdc": notional_usdc,
+    }
+
+
+def close_late_resolution_capture_position(
+    settings: LatencyBotSettings,
+    *,
+    position_id: str,
+    ts: str,
+    mark: float,
+    pnl: float,
+    reason: str,
+) -> None:
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            UPDATE late_resolution_capture_positions
+            SET status = 'closed'
+            WHERE position_id = ?
+              AND status = 'open'
+            """,
+            (position_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO late_resolution_capture_events (
+                ts, position_id, event_type, mark, pnl, reason
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, position_id, "close", float(mark), float(pnl), reason),
+        )
+        conn.commit()
+
+
 def load_temporal_inventory_open_markets(settings: LatencyBotSettings) -> list[dict[str, Any]]:
     with connect_latency_bot_db(settings) as conn:
         rows = conn.execute(
@@ -2339,6 +2573,159 @@ def close_temporal_inventory_quote(
                 float(adverse_selection_loss_usdc),
                 quote_id,
             ),
+        )
+        conn.commit()
+
+
+def _json_dump_payload(payload: Any) -> str:
+    try:
+        return json.dumps(payload, sort_keys=True)
+    except TypeError:
+        return json.dumps({"repr": repr(payload)}, sort_keys=True)
+
+
+def record_live_temporal_inventory_maker_order(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    asset: str,
+    side: str,
+    token_id: str,
+    price: float,
+    size: float,
+    mode: str,
+    decision: str,
+    status: str,
+    edge: float,
+    reason: str,
+    clob_order_id: str = "",
+    order_payload: Any = None,
+    error: str = "",
+) -> dict[str, Any]:
+    local_order_id = str(uuid.uuid4())
+    notional_usdc = round(float(price) * float(size), 8)
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO live_temporal_inventory_maker_orders (
+                local_order_id, ts_created, ts_updated, market_id, asset, side, token_id,
+                price, size, notional_usdc, mode, decision, status, edge, reason,
+                clob_order_id, order_payload, cancel_payload, error, heartbeat_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                local_order_id,
+                ts,
+                ts,
+                market_id,
+                asset,
+                side,
+                token_id,
+                float(price),
+                float(size),
+                notional_usdc,
+                mode,
+                decision,
+                status,
+                float(edge),
+                reason,
+                clob_order_id,
+                _json_dump_payload(order_payload) if order_payload is not None else "",
+                "",
+                error,
+                ts,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM live_temporal_inventory_maker_orders WHERE local_order_id = ?",
+            (local_order_id,),
+        ).fetchone()
+        conn.commit()
+    return dict(row) if row is not None else {}
+
+
+def update_live_temporal_inventory_maker_order(
+    settings: LatencyBotSettings,
+    *,
+    local_order_id: str,
+    ts: str,
+    status: str,
+    decision: str | None = None,
+    reason: str | None = None,
+    clob_order_id: str | None = None,
+    order_payload: Any = None,
+    cancel_payload: Any = None,
+    error: str | None = None,
+) -> None:
+    with connect_latency_bot_db(settings) as conn:
+        existing = conn.execute(
+            "SELECT * FROM live_temporal_inventory_maker_orders WHERE local_order_id = ?",
+            (local_order_id,),
+        ).fetchone()
+        if existing is None:
+            return
+        conn.execute(
+            """
+            UPDATE live_temporal_inventory_maker_orders
+            SET ts_updated = ?,
+                status = ?,
+                decision = ?,
+                reason = ?,
+                clob_order_id = ?,
+                order_payload = ?,
+                cancel_payload = ?,
+                error = ?,
+                heartbeat_ts = ?
+            WHERE local_order_id = ?
+            """,
+            (
+                ts,
+                status,
+                decision if decision is not None else str(existing["decision"] or ""),
+                reason if reason is not None else str(existing["reason"] or ""),
+                clob_order_id if clob_order_id is not None else str(existing["clob_order_id"] or ""),
+                _json_dump_payload(order_payload) if order_payload is not None else str(existing["order_payload"] or ""),
+                _json_dump_payload(cancel_payload) if cancel_payload is not None else str(existing["cancel_payload"] or ""),
+                error if error is not None else str(existing["error"] or ""),
+                ts,
+                local_order_id,
+            ),
+        )
+        conn.commit()
+
+
+def load_live_temporal_inventory_maker_open_orders(settings: LatencyBotSettings) -> list[dict[str, Any]]:
+    with connect_latency_bot_db(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM live_temporal_inventory_maker_orders
+            WHERE status = 'open'
+            ORDER BY ts_created ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_live_temporal_inventory_maker_heartbeat(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    status: str,
+    armed: bool,
+    open_orders: int,
+    cancel_all_ok: bool,
+    reason: str,
+) -> None:
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO live_temporal_inventory_maker_heartbeats (
+                ts, status, armed, open_orders, cancel_all_ok, reason
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, status, 1 if armed else 0, int(open_orders), 1 if cancel_all_ok else 0, reason),
         )
         conn.commit()
 
@@ -3231,14 +3618,19 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
             "clob_cash_usdc": 0.0,
             "cash_minus_pilot_capital_usdc": 0.0,
             "clob_open_orders": 0,
+            "clob_open_positions": 0,
             "clob_recent_trades": 0,
             "clob_recent_buy_spend_usdc": 0.0,
             "clob_recent_sell_proceeds_usdc": 0.0,
             "clob_recent_net_trade_cashflow_usdc": 0.0,
             "local_live_attempt_rows": 0,
+            "local_live_maker_order_rows": 0,
             "local_order_ids_recorded": 0,
+            "local_order_id_match_rate": 0.0,
             "clob_trades_matching_local_order_ids": 0,
             "clob_trades_not_in_local_order_ids": 0,
+            "local_realized_pnl_usdc": 0.0,
+            "local_vs_clob_cashflow_gap_usdc": 0.0,
             "note": "Polymarket account cash is authoritative; local matched-leg PnL is a reconstruction.",
         }
 
@@ -3264,7 +3656,7 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
         )
     )
     if not credentials_configured:
-        return {"summary": empty_summary("missing_credentials"), "recent_trades": [], "unmatched_trades": [], "open_orders": []}
+        return {"summary": empty_summary("missing_credentials"), "recent_trades": [], "unmatched_trades": [], "open_orders": [], "open_positions": []}
 
     try:
         from .execution.polymarket_live_client import PolymarketLiveCompleteSetClient
@@ -3272,32 +3664,52 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
         client = PolymarketLiveCompleteSetClient(settings)
         balance = client.get_collateral_balance_allowance()
         open_orders = client.get_open_orders()
+        positions = client.get_positions()
         trades = client.get_recent_trades()
     except Exception as exc:
-        return {"summary": empty_summary("error", str(exc)), "recent_trades": [], "unmatched_trades": [], "open_orders": []}
+        return {"summary": empty_summary("error", str(exc)), "recent_trades": [], "unmatched_trades": [], "open_orders": [], "open_positions": []}
 
     local_order_ids: set[str] = set()
     local_rows = 0
+    local_maker_rows = 0
+    local_realized_pnl = 0.0
     try:
         with connect_latency_bot_db(settings) as conn:
             rows = conn.execute(
                 """
-                SELECT yes_order_id, no_order_id, error
+                SELECT yes_order_id, no_order_id, error, realized_pnl_usdc
                 FROM live_complete_set_arb_pilot_attempts
                 WHERE COALESCE(yes_order_id, '') <> '' OR COALESCE(no_order_id, '') <> ''
                    OR COALESCE(error, '') <> ''
                 """
             ).fetchall()
+            maker_rows = conn.execute(
+                """
+                SELECT clob_order_id, error
+                FROM live_temporal_inventory_maker_orders
+                WHERE COALESCE(clob_order_id, '') <> '' OR COALESCE(error, '') <> ''
+                """
+            ).fetchall()
         local_rows = len(rows)
+        local_maker_rows = len(maker_rows)
         for row in rows:
+            local_realized_pnl = round(local_realized_pnl + float(row["realized_pnl_usdc"] or 0.0), 6)
             for key in ("yes_order_id", "no_order_id"):
                 order_id = str(row[key] or "").strip()
                 if order_id:
                     local_order_ids.add(order_id)
             for order_id in _extract_clob_order_ids(str(row["error"] or "")):
                 local_order_ids.add(order_id)
+        for row in maker_rows:
+            order_id = str(row["clob_order_id"] or "").strip()
+            if order_id:
+                local_order_ids.add(order_id)
+            for order_id in _extract_clob_order_ids(str(row["error"] or "")):
+                local_order_ids.add(order_id)
     except sqlite3.Error:
         local_rows = 0
+        local_maker_rows = 0
+        local_realized_pnl = 0.0
         local_order_ids = set()
 
     clob_cash = money_from_micro(balance.get("balance"))
@@ -3305,6 +3717,7 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
     buy_spend = 0.0
     sell_proceeds = 0.0
     matched_local = 0
+    matched_local_order_ids: set[str] = set()
     unmatched_trades: list[dict[str, Any]] = []
     for trade in trades:
         side = str(trade.get("side") or "").upper()
@@ -3323,6 +3736,7 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
         is_local = bool(order_id and order_id in local_order_ids)
         if is_local:
             matched_local += 1
+            matched_local_order_ids.add(order_id)
         normalized = {
             "ts": trade_ts(trade.get("match_time") or trade.get("last_update")),
             "market": str(trade.get("market") or ""),
@@ -3346,14 +3760,19 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
             "clob_cash_usdc": round(clob_cash, 6),
             "cash_minus_pilot_capital_usdc": round(clob_cash - pilot_capital, 6),
             "clob_open_orders": len(open_orders),
+            "clob_open_positions": len(positions),
             "clob_recent_trades": len(normalized_trades),
             "clob_recent_buy_spend_usdc": round(buy_spend, 6),
             "clob_recent_sell_proceeds_usdc": round(sell_proceeds, 6),
             "clob_recent_net_trade_cashflow_usdc": round(sell_proceeds - buy_spend, 6),
             "local_live_attempt_rows": local_rows,
+            "local_live_maker_order_rows": local_maker_rows,
             "local_order_ids_recorded": len(local_order_ids),
+            "local_order_id_match_rate": round(len(matched_local_order_ids) / len(local_order_ids), 4) if local_order_ids else 0.0,
             "clob_trades_matching_local_order_ids": matched_local,
             "clob_trades_not_in_local_order_ids": max(len(normalized_trades) - matched_local, 0),
+            "local_realized_pnl_usdc": round(local_realized_pnl, 6),
+            "local_vs_clob_cashflow_gap_usdc": round((sell_proceeds - buy_spend) - local_realized_pnl, 6),
         }
     )
     return {
@@ -3361,6 +3780,7 @@ def latency_bot_polymarket_account_reconciliation(settings: LatencyBotSettings) 
         "recent_trades": normalized_trades[:40],
         "unmatched_trades": unmatched_trades[:20],
         "open_orders": open_orders[:20],
+        "open_positions": positions[:20],
     }
 
 
@@ -5862,6 +6282,223 @@ def latency_bot_temporal_inventory_maker_paper_stats(settings: LatencyBotSetting
     }
 
 
+def latency_bot_live_temporal_inventory_maker_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    cutoff_24h_ts = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    with connect_latency_bot_db(settings) as conn:
+        order_rows = conn.execute(
+            """
+            SELECT *
+            FROM live_temporal_inventory_maker_orders
+            ORDER BY ts_created DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        open_rows = conn.execute(
+            """
+            SELECT *
+            FROM live_temporal_inventory_maker_orders
+            WHERE status = 'open'
+            ORDER BY ts_created ASC
+            """
+        ).fetchall()
+        heartbeat_row = conn.execute(
+            """
+            SELECT *
+            FROM live_temporal_inventory_maker_heartbeats
+            ORDER BY ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        summary_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS orders,
+                SUM(CASE WHEN decision = 'SUBMITTED' THEN 1 ELSE 0 END) AS submitted,
+                SUM(CASE WHEN decision = 'DRY_RUN' THEN 1 ELSE 0 END) AS dry_run,
+                SUM(CASE WHEN decision = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked,
+                SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+            FROM live_temporal_inventory_maker_orders
+            WHERE ts_created >= ?
+            """,
+            (cutoff_24h_ts,),
+        ).fetchone()
+    open_notional = round(sum(float(row["notional_usdc"] or 0.0) for row in open_rows), 6)
+    heartbeat = dict(heartbeat_row) if heartbeat_row is not None else {}
+    armed = (
+        bool(settings.live_temporal_inventory_maker_enabled)
+        and str(settings.live_temporal_inventory_maker_mode or "").lower() == "live"
+        and str(settings.live_temporal_inventory_maker_confirm or "") == "LIVE_TEMPORAL_INVENTORY_MAKER"
+    )
+    summary = {
+        "mode": "Guarded live temporal inventory maker",
+        "enabled": bool(settings.live_temporal_inventory_maker_enabled),
+        "pilot_mode": str(settings.live_temporal_inventory_maker_mode or "dry_run"),
+        "armed_for_live_orders": armed,
+        "confirmation_required": "LIVE_TEMPORAL_INVENTORY_MAKER",
+        "capital_usdc": round(float(settings.live_temporal_inventory_maker_capital_usdc), 6),
+        "base_order_usdc": round(float(settings.live_temporal_inventory_maker_base_order_usdc), 6),
+        "max_open_orders": int(settings.live_temporal_inventory_maker_max_open_orders),
+        "max_orders_per_cycle": int(settings.live_temporal_inventory_maker_max_orders_per_cycle),
+        "min_edge": round(float(settings.live_temporal_inventory_maker_min_edge), 6),
+        "min_seconds_left": int(settings.live_temporal_inventory_maker_min_seconds_left),
+        "max_order_age_seconds": int(settings.live_temporal_inventory_maker_max_order_age_seconds),
+        "heartbeat_timeout_seconds": int(settings.live_temporal_inventory_maker_heartbeat_timeout_seconds),
+        "daily_loss_limit_usdc": round(float(settings.live_temporal_inventory_maker_daily_loss_limit_usdc), 6),
+        "open_orders": len(open_rows),
+        "open_notional_usdc": open_notional,
+        "submitted_24h": int(summary_row["submitted"] or 0) if summary_row else 0,
+        "dry_run_24h": int(summary_row["dry_run"] or 0) if summary_row else 0,
+        "blocked_24h": int(summary_row["blocked"] or 0) if summary_row else 0,
+        "cancelled_24h": int(summary_row["cancelled"] or 0) if summary_row else 0,
+        "failed_24h": int(summary_row["failed"] or 0) if summary_row else 0,
+        "last_heartbeat_ts": str(heartbeat.get("ts") or ""),
+        "last_heartbeat_status": str(heartbeat.get("status") or ""),
+        "last_heartbeat_reason": str(heartbeat.get("reason") or ""),
+        "last_heartbeat_cancel_all_ok": bool(heartbeat.get("cancel_all_ok")),
+    }
+    return {
+        "summary": summary,
+        "recent_orders": [dict(row) for row in order_rows],
+        "open_orders": [dict(row) for row in open_rows],
+    }
+
+
+def latency_bot_late_resolution_capture_paper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
+    cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+    capital = max(float(settings.late_resolution_capture_paper_capital_usdc), 0.0)
+    with connect_latency_bot_db(settings) as conn:
+        signal_rows = conn.execute(
+            """
+            SELECT *
+            FROM late_resolution_capture_signals
+            ORDER BY ts DESC, id DESC
+            LIMIT 60
+            """
+        ).fetchall()
+        signal_summary = conn.execute(
+            """
+            SELECT COUNT(*) AS signals,
+                   SUM(CASE WHEN eligible THEN 1 ELSE 0 END) AS eligible,
+                   MAX(edge) AS best_edge
+            FROM late_resolution_capture_signals
+            WHERE ts >= ?
+            """,
+            (cutoff_60m_ts,),
+        ).fetchone()
+        reason_rows = conn.execute(
+            """
+            SELECT reason, COUNT(*) AS count, MAX(edge) AS max_edge
+            FROM late_resolution_capture_signals
+            WHERE ts >= ?
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            LIMIT 30
+            """,
+            (cutoff_60m_ts,),
+        ).fetchall()
+        open_rows = conn.execute(
+            """
+            SELECT *
+            FROM late_resolution_capture_positions
+            WHERE status = 'open'
+            ORDER BY entry_ts ASC
+            """
+        ).fetchall()
+        close_rows = conn.execute(
+            """
+            SELECT e.ts, p.position_id, p.market_id, p.asset, p.side, p.entry_price,
+                   e.mark AS exit_price, p.size, p.notional_usdc, p.entry_edge,
+                   p.entry_official_confidence, p.entry_boundary_distance_bps,
+                   e.pnl, e.reason
+            FROM late_resolution_capture_events e
+            JOIN late_resolution_capture_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close'
+            ORDER BY e.ts ASC, e.id ASC
+            """
+        ).fetchall()
+        recent_close_rows = conn.execute(
+            """
+            SELECT e.ts, p.position_id, p.market_id, p.asset, p.side, p.entry_price,
+                   e.mark AS exit_price, p.size, p.notional_usdc, p.entry_edge,
+                   p.entry_official_confidence, p.entry_boundary_distance_bps,
+                   e.pnl, e.reason
+            FROM late_resolution_capture_events e
+            JOIN late_resolution_capture_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close'
+            ORDER BY e.ts DESC, e.id DESC
+            LIMIT 30
+            """
+        ).fetchall()
+
+    pnls = [float(row["pnl"] or 0.0) for row in close_rows]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    realized_24h = 0.0
+    curve: list[dict[str, Any]] = []
+    for row in close_rows:
+        pnl = float(row["pnl"] or 0.0)
+        running = round(running + pnl, 6)
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+        parsed_ts = _storage_parse_ts(str(row["ts"] or ""))
+        if parsed_ts is not None and parsed_ts >= cutoff_24h:
+            realized_24h = round(realized_24h + pnl, 6)
+        curve.append(
+            {
+                "ts": str(row["ts"] or ""),
+                "realized_pnl_usdc": running,
+                "unrealized_pnl_usdc": 0.0,
+                "equity_usdc": round(capital + running, 6),
+            }
+        )
+    closed = len(pnls)
+    wins = sum(1 for pnl in pnls if pnl > 0.0)
+    signals = int(signal_summary["signals"] or 0) if signal_summary else 0
+    eligible = int(signal_summary["eligible"] or 0) if signal_summary else 0
+    open_capital = round(sum(float(row["notional_usdc"] or 0.0) for row in open_rows), 6)
+    summary = {
+        "mode": "late_resolution_capture_paper",
+        "enabled": bool(settings.late_resolution_capture_paper_enabled),
+        "starting_capital_usdc": round(capital, 6),
+        "equity_usdc": round(capital + sum(pnls), 6),
+        "net_pnl": round(sum(pnls), 6),
+        "realized_pnl_24h_usdc": round(realized_24h, 6),
+        "projected_monthly_revenue_usdc": round(realized_24h * 30.0, 6),
+        "projected_yearly_revenue_usdc": round(realized_24h * 365.0, 6),
+        "open": len(open_rows),
+        "closed": closed,
+        "win_rate": round(wins / closed, 4) if closed else 0.0,
+        "avg_pnl": round(sum(pnls) / closed, 6) if closed else 0.0,
+        "max_drawdown": round(max_drawdown, 6),
+        "current_capital_in_use_usdc": open_capital,
+        "signals_60m": signals,
+        "eligible_60m": eligible,
+        "eligible_rate_60m": round(eligible / signals, 4) if signals else 0.0,
+        "best_edge_60m": round(float(signal_summary["best_edge"] or 0.0), 6) if signal_summary else 0.0,
+        "target_notional_usdc": round(float(settings.late_resolution_capture_paper_notional_usdc), 6),
+        "max_market_exposure_usdc": round(float(settings.late_resolution_capture_paper_max_market_exposure_usdc), 6),
+        "max_total_exposure_usdc": round(float(settings.late_resolution_capture_paper_max_total_exposure_usdc), 6),
+        "min_seconds_left": int(settings.late_resolution_capture_paper_min_seconds_left),
+        "max_seconds_left": int(settings.late_resolution_capture_paper_max_seconds_left),
+        "min_official_confidence": round(float(settings.late_resolution_capture_paper_min_official_confidence), 6),
+        "min_boundary_distance_bps": round(float(settings.late_resolution_capture_paper_min_boundary_distance_bps), 6),
+        "min_edge": round(float(settings.late_resolution_capture_paper_min_edge), 6),
+        "daily_loss_limit_usdc": round(float(settings.late_resolution_capture_paper_daily_loss_limit_usdc), 6),
+    }
+    return {
+        "summary": summary,
+        "recent_signals": [dict(row) for row in signal_rows],
+        "reason_breakdown": [dict(row) for row in reason_rows],
+        "open_positions": [dict(row) for row in open_rows],
+        "recent_closes": [dict(row) for row in recent_close_rows],
+        "equity_curve": curve[-200:],
+    }
+
+
 def latency_bot_preowned_inventory_arb_sim(settings: LatencyBotSettings) -> dict[str, Any]:
     lookback_hours = max(int(settings.realistic_complete_set_arb_lookback_hours), 1)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
@@ -7048,6 +7685,9 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "temporal_inventory_markets_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_markets").fetchone()["count"]),
             "temporal_inventory_events_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_events").fetchone()["count"]),
             "temporal_inventory_quotes_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_quotes").fetchone()["count"]),
+            "live_temporal_inventory_maker_orders_total": int(conn.execute("SELECT COUNT(*) AS count FROM live_temporal_inventory_maker_orders").fetchone()["count"]),
+            "late_resolution_capture_signals_total": int(conn.execute("SELECT COUNT(*) AS count FROM late_resolution_capture_signals").fetchone()["count"]),
+            "late_resolution_capture_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM late_resolution_capture_positions").fetchone()["count"]),
             "complete_set_arb_signals_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_signals").fetchone()["count"]),
             "complete_set_arb_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_positions").fetchone()["count"]),
             "live_complete_set_arb_pilot_attempts_total": int(conn.execute("SELECT COUNT(*) AS count FROM live_complete_set_arb_pilot_attempts").fetchone()["count"]),
@@ -7072,6 +7712,8 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "cex_latency_paper_signals": count_recent("cex_latency_paper_signals"),
             "temporal_inventory_events": count_recent("temporal_inventory_events"),
             "temporal_inventory_quotes": count_recent("temporal_inventory_quotes", "ts_created"),
+            "live_temporal_inventory_maker_orders": count_recent("live_temporal_inventory_maker_orders", "ts_created"),
+            "late_resolution_capture_signals": count_recent("late_resolution_capture_signals"),
             "complete_set_arb_signals": count_recent("complete_set_arb_signals"),
             "complete_set_arb_closes": int(complete_set_closes_row["count"]) if complete_set_closes_row else 0,
             "live_complete_set_arb_pilot_attempts": count_recent("live_complete_set_arb_pilot_attempts"),

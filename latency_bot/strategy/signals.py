@@ -698,6 +698,97 @@ def build_temporal_inventory_maker_paper_signals(
     return results
 
 
+def build_late_resolution_capture_paper_signals(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    fair_values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not settings.late_resolution_capture_paper_enabled:
+        return []
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_id = {str(item.get("market_id") or ""): item for item in markets if isinstance(item, dict)}
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    results: list[dict[str, Any]] = []
+    for fair in fair_values:
+        if not isinstance(fair, dict):
+            continue
+        market_id = str(fair.get("market_id") or "")
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        if market is None or cache is None:
+            continue
+        asset = str(fair.get("asset") or market.get("asset") or "").lower()
+        tenor = int(market.get("tenor_minutes") or 0)
+        fair_yes = _clamp_probability(float(fair.get("fair_yes") or 0.5))
+        fair_no = 1.0 - fair_yes
+        reference_price = float(fair.get("reference_price") or 0.0)
+        current_price = float(fair.get("current_price") or 0.0)
+        boundary_distance_bps = (
+            abs(current_price - reference_price) / reference_price * 10000.0
+            if reference_price > 0.0 and current_price > 0.0
+            else 0.0
+        )
+        side = "YES" if fair_yes >= fair_no else "NO"
+        official_confidence = max(fair_yes, fair_no)
+        best_bid = float(cache.get("best_bid") or 0.0)
+        best_ask = float(cache.get("best_ask") or 0.0)
+        no_bid = float(cache.get("no_best_bid") or max(1.0 - best_ask, 0.0))
+        no_ask = float(cache.get("no_best_ask") or max(1.0 - best_bid, 0.0))
+        order_price = float(cache.get("ask_vwap") or best_ask) if side == "YES" else float(cache.get("no_ask_vwap") or no_ask)
+        min_depth = float(cache.get("ask_fillable_usdc") or cache.get("asks_depth_usdc") or 0.0) if side == "YES" else float(cache.get("no_ask_fillable_usdc") or cache.get("no_asks_depth_usdc") or 0.0)
+        seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
+        edge = official_confidence - order_price - float(settings.taker_slippage_per_share or 0.0) - float(settings.taker_fee_per_share or 0.0)
+        signal = {
+            "market_id": market_id,
+            "asset": asset,
+            "tenor_minutes": tenor,
+            "side": side,
+            "signal_type": "LATE_RESOLUTION_SKIP",
+            "mode": "late_resolution_capture_paper",
+            "edge": round(max(edge, 0.0), 6),
+            "order_price": order_price,
+            "fair_yes": fair_yes,
+            "fair_no": fair_no,
+            "yes_bid": best_bid,
+            "yes_ask": best_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "official_confidence": official_confidence,
+            "boundary_distance_bps": boundary_distance_bps,
+            "seconds_left": seconds_left,
+            "min_depth_usdc": min_depth,
+            "book_age_ms": float(cache.get("book_age_ms") or 0.0),
+            "eligible": False,
+            "reason": "late-resolution edge below threshold",
+            "blocked_reason": "edge",
+        }
+        if seconds_left < settings.late_resolution_capture_paper_min_seconds_left:
+            signal.update({"reason": "too close to expiry for capture entry", "blocked_reason": "min_time", "edge": 0.0})
+        elif seconds_left > settings.late_resolution_capture_paper_max_seconds_left:
+            signal.update({"reason": "too far from expiry for late capture", "blocked_reason": "max_time", "edge": 0.0})
+        elif official_confidence < settings.late_resolution_capture_paper_min_official_confidence:
+            signal.update({"reason": "official confidence below threshold", "blocked_reason": "official_confidence", "edge": 0.0})
+        elif boundary_distance_bps < settings.late_resolution_capture_paper_min_boundary_distance_bps:
+            signal.update({"reason": "boundary distance below threshold", "blocked_reason": "boundary_distance", "edge": 0.0})
+        elif order_price <= 0.0:
+            signal.update({"reason": "missing entry price", "blocked_reason": "price", "edge": 0.0})
+        elif edge >= settings.late_resolution_capture_paper_min_edge:
+            signal.update(
+                {
+                    "signal_type": f"LATE_RESOLUTION_CAPTURE_{side}",
+                    "edge": round(edge, 6),
+                    "eligible": True,
+                    "reason": "late-resolution capture edge clears threshold",
+                    "blocked_reason": "",
+                }
+            )
+        results.append(signal)
+    return results
+
+
 def _wallet_trade_ts(raw: Any) -> datetime | None:
     if raw is None:
         return None

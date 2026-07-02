@@ -25,9 +25,11 @@ from .storage import (
     latency_bot_kalshi_arb_sim,
     latency_bot_live_strategy_equity_curves,
     latency_bot_live_complete_set_arb_pilot_stats,
+    latency_bot_live_temporal_inventory_maker_stats,
     latency_bot_opportunity_stats,
     latency_bot_performance_stats,
     latency_bot_polymarket_account_reconciliation,
+    latency_bot_late_resolution_capture_paper_stats,
     latency_bot_polymarket_us_arb_sim,
     latency_bot_preowned_inventory_arb_sim,
     latency_bot_signal_feature_stats,
@@ -490,6 +492,8 @@ def _summarize_latency_bot_db_fast(settings: LatencyBotSettings, minutes: int = 
             ("shadow_signals", "shadow_signals"),
             ("shadow_variant_signals", "shadow_variant_signals"),
             ("cex_latency_paper_signals", "cex_latency_paper_signals"),
+            ("temporal_inventory_events", "temporal_inventory_events"),
+            ("late_resolution_capture_signals", "late_resolution_capture_signals"),
             ("complete_set_arb_signals", "complete_set_arb_signals"),
             ("live_complete_set_arb_pilot_attempts", "live_complete_set_arb_pilot_attempts"),
             ("polymarket_us_arb_ticks", "polymarket_us_arb_ticks"),
@@ -499,6 +503,8 @@ def _summarize_latency_bot_db_fast(settings: LatencyBotSettings, minutes: int = 
             ("engine_cycles", "engine_cycles"),
         ):
             recent_counts[key] = count_recent(table)
+        recent_counts["temporal_inventory_quotes"] = count_recent("temporal_inventory_quotes", "ts_created")
+        recent_counts["live_temporal_inventory_maker_orders"] = count_recent("live_temporal_inventory_maker_orders", "ts_created")
         try:
             close_row = conn.execute(
                 """
@@ -605,6 +611,8 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     cex_latency_paper = latency_bot_cex_latency_paper_stats(settings)
     btc_fair_value_paper = latency_bot_btc_fair_value_paper_stats(settings)
     temporal_inventory_maker_paper = latency_bot_temporal_inventory_maker_paper_stats(settings)
+    live_temporal_inventory_maker = latency_bot_live_temporal_inventory_maker_stats(settings)
+    late_resolution_capture_paper = latency_bot_late_resolution_capture_paper_stats(settings)
     wallet_teacher_sniper = latency_bot_wallet_teacher_sniper_stats(settings)
     realistic_complete_set_arb = {} if fast else latency_bot_realistic_complete_set_arb_sim(settings)
     preowned_inventory_arb = latency_bot_preowned_inventory_arb_sim(settings)
@@ -658,6 +666,8 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         "cex_latency_paper": cex_latency_paper,
         "btc_fair_value_paper": btc_fair_value_paper,
         "temporal_inventory_maker_paper": temporal_inventory_maker_paper,
+        "live_temporal_inventory_maker": live_temporal_inventory_maker,
+        "late_resolution_capture_paper": late_resolution_capture_paper,
         "wallet_teacher_sniper": wallet_teacher_sniper,
         "realistic_complete_set_arb": realistic_complete_set_arb,
         "realistic_complete_set_arb_all_time": realistic_complete_set_arb_all_time,
@@ -718,6 +728,16 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         if isinstance(state.get("temporal_inventory_maker_paper"), dict)
         else {}
     )
+    live_temporal_inventory_maker = (
+        state.get("live_temporal_inventory_maker", {})
+        if isinstance(state.get("live_temporal_inventory_maker"), dict)
+        else {}
+    )
+    late_resolution_capture_paper = (
+        state.get("late_resolution_capture_paper", {})
+        if isinstance(state.get("late_resolution_capture_paper"), dict)
+        else {}
+    )
     wallet_teacher_sniper = state.get("wallet_teacher_sniper", {}) if isinstance(state.get("wallet_teacher_sniper"), dict) else {}
     realistic_complete_set_arb = state.get("realistic_complete_set_arb", {}) if isinstance(state.get("realistic_complete_set_arb"), dict) else {}
     realistic_complete_set_arb_all_time = (
@@ -739,6 +759,16 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     temporal_inventory_summary = (
         temporal_inventory_maker_paper.get("summary", {})
         if isinstance(temporal_inventory_maker_paper.get("summary"), dict)
+        else {}
+    )
+    live_temporal_summary = (
+        live_temporal_inventory_maker.get("summary", {})
+        if isinstance(live_temporal_inventory_maker.get("summary"), dict)
+        else {}
+    )
+    late_resolution_summary = (
+        late_resolution_capture_paper.get("summary", {})
+        if isinstance(late_resolution_capture_paper.get("summary"), dict)
         else {}
     )
     consensus_meta = _consensus_meta_strategy_data(shadow_yes_variant_stats)
@@ -840,6 +870,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["CEX Latency Paper Signals (60m)", html.escape(_fmt_num(recent_counts.get("cex_latency_paper_signals", 0)))],
         ["Temporal Inventory Events (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_events", 0)))],
         ["Temporal Inventory Quotes (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_quotes", 0)))],
+        ["Live Temporal Maker Orders (60m)", html.escape(_fmt_num(recent_counts.get("live_temporal_inventory_maker_orders", 0)))],
+        ["Late Resolution Signals (60m)", html.escape(_fmt_num(recent_counts.get("late_resolution_capture_signals", 0)))],
         ["Complete-Set Arb Signals (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_signals", 0)))],
         ["Complete-Set Arb Closes (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_closes", 0)))],
         ["Live Arb Pilot Attempts (60m)", html.escape(_fmt_num(recent_counts.get("live_complete_set_arb_pilot_attempts", 0)))],
@@ -1148,6 +1180,164 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 html.escape(str(item.get("cancel_reason") or item.get("reason") or "")),
             ]
             for item in temporal_inventory_maker_paper.get("recent_quotes", [])
+        ],
+    )
+    live_temporal_execution_result = (
+        last_cycle_result.get("live_temporal_inventory_maker", {})
+        if isinstance(last_cycle_result.get("live_temporal_inventory_maker"), dict)
+        else {}
+    )
+    live_temporal_execution = (
+        live_temporal_execution_result.get("execution", {})
+        if isinstance(live_temporal_execution_result.get("execution"), dict)
+        else {}
+    )
+    live_temporal_summary_rows = [
+        ["Mode", html.escape(str(live_temporal_summary.get("mode", "Guarded live temporal inventory maker")))],
+        ["Enabled", html.escape(str(bool(live_temporal_summary.get("enabled"))).lower())],
+        ["Pilot Mode", html.escape(str(live_temporal_summary.get("pilot_mode", "dry_run")))],
+        ["Armed For Live Orders", html.escape(str(bool(live_temporal_summary.get("armed_for_live_orders"))).lower())],
+        ["Confirmation Required", html.escape(str(live_temporal_summary.get("confirmation_required", "")))],
+        ["Capital Cap", html.escape(_fmt_money(live_temporal_summary.get("capital_usdc", 0.0)))],
+        ["Base Order", html.escape(_fmt_money(live_temporal_summary.get("base_order_usdc", 0.0)))],
+        ["Max Open Orders", html.escape(_fmt_num(live_temporal_summary.get("max_open_orders", 0)))],
+        ["Max Orders / Cycle", html.escape(_fmt_num(live_temporal_summary.get("max_orders_per_cycle", 0)))],
+        ["Min Edge", html.escape(f"{float(live_temporal_summary.get('min_edge', 0.0)):.4f}")],
+        ["Min Seconds Left", html.escape(f"{_fmt_num(live_temporal_summary.get('min_seconds_left', 0))}s")],
+        ["Heartbeat Timeout", html.escape(f"{_fmt_num(live_temporal_summary.get('heartbeat_timeout_seconds', 0))}s")],
+        ["Max Order Age", html.escape(f"{_fmt_num(live_temporal_summary.get('max_order_age_seconds', 0))}s")],
+        ["Daily Loss Limit", html.escape(_fmt_money(live_temporal_summary.get("daily_loss_limit_usdc", 0.0)))],
+        ["Open Local Maker Orders", html.escape(_fmt_num(live_temporal_summary.get("open_orders", 0)))],
+        ["Open Local Maker Notional", html.escape(_fmt_money(live_temporal_summary.get("open_notional_usdc", 0.0)))],
+        ["Submitted / Dry-Run 24h", html.escape(f"{_fmt_num(live_temporal_summary.get('submitted_24h', 0))} / {_fmt_num(live_temporal_summary.get('dry_run_24h', 0))}")],
+        ["Blocked / Failed 24h", html.escape(f"{_fmt_num(live_temporal_summary.get('blocked_24h', 0))} / {_fmt_num(live_temporal_summary.get('failed_24h', 0))}")],
+        ["Cancelled 24h", html.escape(_fmt_num(live_temporal_summary.get("cancelled_24h", 0)))],
+        ["Last Heartbeat (CT)", html.escape(_fmt_ts(live_temporal_summary.get("last_heartbeat_ts")))],
+        ["Last Heartbeat Status", html.escape(str(live_temporal_summary.get("last_heartbeat_status", "")) or "-")],
+        ["Cancel-All Available", html.escape(str(bool(live_temporal_summary.get("last_heartbeat_cancel_all_ok"))).lower())],
+        ["Heartbeat Reason", html.escape(str(live_temporal_summary.get("last_heartbeat_reason", "")) or "-")],
+        ["Last Cycle Submitted / Dry-Run", html.escape(f"{_fmt_num(live_temporal_execution.get('submitted_count', 0))} / {_fmt_num(live_temporal_execution.get('dry_run_count', 0))}")],
+        ["Last Cycle Blocked / Cancelled / Failed", html.escape(f"{_fmt_num(live_temporal_execution.get('blocked_count', 0))} / {_fmt_num(live_temporal_execution.get('cancelled_count', 0))} / {_fmt_num(live_temporal_execution.get('failed_count', 0))}")],
+        ["Last Cycle CLOB Cash", html.escape(_fmt_money(live_temporal_execution.get("clob_cash_usdc", 0.0)))],
+        ["Last Cycle CLOB Open Orders", html.escape(_fmt_num(live_temporal_execution.get("clob_open_orders", 0)))],
+        ["Last Cycle CLOB Open Positions", html.escape(_fmt_num(live_temporal_execution.get("clob_open_positions", 0)))],
+        ["Last Cycle Recent CLOB Trades", html.escape(_fmt_num(live_temporal_execution.get("clob_recent_trades", 0)))],
+    ]
+    live_temporal_order_table = _table(
+        ["Created (CT)", "Market", "Side", "Price", "Size", "Status", "Decision", "Edge", "CLOB Order", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts_created"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('size') or 0.0):.4f}"),
+                html.escape(str(item.get("status", ""))),
+                html.escape(str(item.get("decision", ""))),
+                html.escape(f"{float(item.get('edge') or 0.0):.4f}"),
+                html.escape((str(item.get("clob_order_id", ""))[:10] + "..." + str(item.get("clob_order_id", ""))[-6:]) if len(str(item.get("clob_order_id", ""))) > 20 else str(item.get("clob_order_id", ""))),
+                html.escape(str(item.get("reason") or item.get("error") or "")),
+            ]
+            for item in live_temporal_inventory_maker.get("recent_orders", [])
+        ],
+    )
+    late_resolution_execution_result = (
+        last_cycle_result.get("late_resolution_capture_paper", {})
+        if isinstance(last_cycle_result.get("late_resolution_capture_paper"), dict)
+        else {}
+    )
+    late_resolution_execution = (
+        late_resolution_execution_result.get("execution", {})
+        if isinstance(late_resolution_execution_result.get("execution"), dict)
+        else {}
+    )
+    late_resolution_summary_rows = [
+        ["Mode", html.escape(str(late_resolution_summary.get("mode", "late_resolution_capture_paper")))],
+        ["Enabled", html.escape(str(bool(late_resolution_summary.get("enabled"))).lower())],
+        ["Starting Capital", html.escape(_fmt_money(late_resolution_summary.get("starting_capital_usdc", 0.0)))],
+        ["Equity", html.escape(_fmt_money(late_resolution_summary.get("equity_usdc", 0.0)))],
+        ["Net PnL", html.escape(_fmt_money(late_resolution_summary.get("net_pnl", 0.0)))],
+        ["24h Realized PnL", html.escape(_fmt_money(late_resolution_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Open / Closed", html.escape(f"{_fmt_num(late_resolution_summary.get('open', 0))} / {_fmt_num(late_resolution_summary.get('closed', 0))}")],
+        ["Win Rate", html.escape(f"{100.0 * float(late_resolution_summary.get('win_rate', 0.0)):.1f}%")],
+        ["Avg PnL", html.escape(_fmt_money(late_resolution_summary.get("avg_pnl", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(late_resolution_summary.get("max_drawdown", 0.0)))],
+        ["Capital In Use", html.escape(_fmt_money(late_resolution_summary.get("current_capital_in_use_usdc", 0.0)))],
+        ["Signals / Eligible 60m", html.escape(f"{_fmt_num(late_resolution_summary.get('signals_60m', 0))} / {_fmt_num(late_resolution_summary.get('eligible_60m', 0))}")],
+        ["Best Edge 60m", html.escape(f"{float(late_resolution_summary.get('best_edge_60m', 0.0)):.4f}")],
+        ["Target Notional", html.escape(_fmt_money(late_resolution_summary.get("target_notional_usdc", 0.0)))],
+        ["Max Market Exposure", html.escape(_fmt_money(late_resolution_summary.get("max_market_exposure_usdc", 0.0)))],
+        ["Max Total Exposure", html.escape(_fmt_money(late_resolution_summary.get("max_total_exposure_usdc", 0.0)))],
+        ["Entry Window", html.escape(f"{_fmt_num(late_resolution_summary.get('min_seconds_left', 0))}s - {_fmt_num(late_resolution_summary.get('max_seconds_left', 0))}s")],
+        ["Min Official Confidence", html.escape(f"{float(late_resolution_summary.get('min_official_confidence', 0.0)):.4f}")],
+        ["Min Boundary Distance", html.escape(f"{float(late_resolution_summary.get('min_boundary_distance_bps', 0.0)):.1f} bps")],
+        ["Min Edge", html.escape(f"{float(late_resolution_summary.get('min_edge', 0.0)):.4f}")],
+        ["Daily Loss Limit", html.escape(_fmt_money(late_resolution_summary.get("daily_loss_limit_usdc", 0.0)))],
+        ["Last Cycle Opened / Closed", html.escape(f"{_fmt_num(late_resolution_execution.get('opened_positions_count', 0))} / {_fmt_num(late_resolution_execution.get('closed_positions_count', 0))}")],
+        ["Last Cycle Entry Blocks", html.escape(_fmt_num(late_resolution_execution.get("entry_blocks_count", 0)))],
+    ]
+    late_resolution_open_table = _table(
+        ["Entry (CT)", "Market", "Asset", "Side", "Entry", "Size", "Notional", "Edge", "Confidence", "Boundary"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("entry_ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('size') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('entry_official_confidence') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('entry_boundary_distance_bps') or 0.0):.1f} bps"),
+            ]
+            for item in late_resolution_capture_paper.get("open_positions", [])
+        ],
+    )
+    late_resolution_close_table = _table(
+        ["Time (CT)", "Market", "Side", "Entry", "Exit", "Size", "Notional", "PnL", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('exit_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('size') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("pnl", 0.0))),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in late_resolution_capture_paper.get("recent_closes", [])
+        ],
+    )
+    late_resolution_signal_table = _table(
+        ["Time (CT)", "Market", "Side", "Eligible", "Edge", "Price", "Confidence", "Boundary", "Seconds", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape("yes" if bool(item.get("eligible")) else "no"),
+                html.escape(f"{float(item.get('edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('order_price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('official_confidence') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('boundary_distance_bps') or 0.0):.1f} bps"),
+                html.escape(f"{float(item.get('seconds_left') or 0.0):.1f}"),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in late_resolution_capture_paper.get("recent_signals", [])
+        ],
+    )
+    late_resolution_reason_table = _table(
+        ["Reason", "Count", "Max Edge"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_edge') or 0.0):.4f}"),
+            ]
+            for item in late_resolution_capture_paper.get("reason_breakdown", [])
         ],
     )
     cex_latency_summary_rows = [
@@ -1867,14 +2057,19 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Pilot Starting Capital", html.escape(_fmt_money(account_reconciliation_summary.get("pilot_starting_capital_usdc", 0.0)))],
         ["Cash - Pilot Starting Capital", html.escape(_fmt_money(account_reconciliation_summary.get("cash_minus_pilot_capital_usdc", 0.0)))],
         ["CLOB Open Orders", html.escape(_fmt_num(account_reconciliation_summary.get("clob_open_orders", 0)))],
+        ["CLOB Open Positions", html.escape(_fmt_num(account_reconciliation_summary.get("clob_open_positions", 0)))],
         ["Recent CLOB Trades Fetched", html.escape(_fmt_num(account_reconciliation_summary.get("clob_recent_trades", 0)))],
         ["Recent BUY Spend", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_buy_spend_usdc", 0.0)))],
         ["Recent SELL Proceeds", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_sell_proceeds_usdc", 0.0)))],
         ["Recent Net Trade Cashflow", html.escape(_fmt_money(account_reconciliation_summary.get("clob_recent_net_trade_cashflow_usdc", 0.0)))],
         ["Local Live Attempt Rows With Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("local_live_attempt_rows", 0)))],
+        ["Local Live Maker Order Rows", html.escape(_fmt_num(account_reconciliation_summary.get("local_live_maker_order_rows", 0)))],
         ["Local Order IDs Recorded", html.escape(_fmt_num(account_reconciliation_summary.get("local_order_ids_recorded", 0)))],
+        ["Local-vs-CLOB Order ID Match Rate", html.escape(f"{100.0 * float(account_reconciliation_summary.get('local_order_id_match_rate', 0.0)):.1f}%")],
         ["CLOB Trades Matching Local Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("clob_trades_matching_local_order_ids", 0)))],
         ["CLOB Trades Not In Local Order IDs", html.escape(_fmt_num(account_reconciliation_summary.get("clob_trades_not_in_local_order_ids", 0)))],
+        ["Local Realized PnL", html.escape(_fmt_money(account_reconciliation_summary.get("local_realized_pnl_usdc", 0.0)))],
+        ["CLOB Cashflow - Local PnL Gap", html.escape(_fmt_money(account_reconciliation_summary.get("local_vs_clob_cashflow_gap_usdc", 0.0)))],
         ["Note", html.escape(str(account_reconciliation_summary.get("note", "")))],
     ]
     account_reconciliation_trade_table = _table(
@@ -1893,6 +2088,38 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 html.escape((str(item.get("transaction_hash", ""))[:10] + "..." + str(item.get("transaction_hash", ""))[-6:]) if len(str(item.get("transaction_hash", ""))) > 20 else str(item.get("transaction_hash", ""))),
             ]
             for item in polymarket_account_reconciliation.get("recent_trades", [])
+        ],
+    )
+    account_reconciliation_open_order_table = _table(
+        ["Order ID", "Market", "Outcome", "Side", "Price", "Size", "Status"],
+        [
+            [
+                html.escape((str(item.get("id") or item.get("order_id") or item.get("orderID") or "")[:10] + "..." + str(item.get("id") or item.get("order_id") or item.get("orderID") or "")[-6:]) if len(str(item.get("id") or item.get("order_id") or item.get("orderID") or "")) > 20 else str(item.get("id") or item.get("order_id") or item.get("orderID") or "")),
+                html.escape(str(item.get("market") or item.get("market_id") or "")),
+                html.escape(str(item.get("outcome") or item.get("asset_id") or "")),
+                html.escape(str(item.get("side") or "")),
+                html.escape(f"{float(item.get('price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('size') or item.get('original_size') or 0.0):.4f}"),
+                html.escape(str(item.get("status") or "")),
+            ]
+            for item in polymarket_account_reconciliation.get("open_orders", [])
+            if isinstance(item, dict)
+        ],
+    )
+    account_reconciliation_position_table = _table(
+        ["Market", "Outcome", "Side", "Size", "Avg Price", "Current Value", "Raw Status"],
+        [
+            [
+                html.escape(str(item.get("market") or item.get("market_id") or "")),
+                html.escape(str(item.get("outcome") or item.get("asset") or item.get("asset_id") or "")),
+                html.escape(str(item.get("side") or "")),
+                html.escape(f"{float(item.get('size') or item.get('balance') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('avg_price') or item.get('average_price') or item.get('price') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("current_value") or item.get("value") or 0.0)),
+                html.escape(str(item.get("status") or item.get("redeemable") or "")),
+            ]
+            for item in polymarket_account_reconciliation.get("open_positions", [])
+            if isinstance(item, dict)
         ],
     )
     live_complete_set_arb_pilot = state.get("live_complete_set_arb_pilot", {}) if isinstance(state.get("live_complete_set_arb_pilot"), dict) else {}
@@ -2712,6 +2939,28 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {temporal_inventory_quote_table}
   </div>
   <div class="panel" style="margin-top:16px;">
+    <h2>Live Temporal Inventory Maker</h2>
+    <div class="sub">Guarded live maker path for the temporal inventory strategy. Live orders require explicit arming, profitable paper posture, account reconciliation, heartbeat, cancel-all protection, and post-only quote checks. Dry-run mode records candidates without submitting orders.</div>
+    {_table(["Metric", "Value"], live_temporal_summary_rows)}
+    <h3>Recent Live Maker Decisions</h3>
+    {live_temporal_order_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>Late Resolution Capture Paper</h2>
+    <div class="sub">Separate paper-only capped-risk module for very near-expiry markets. Its PnL is isolated from the temporal inventory maker because this strategy has different tail risk and promotion criteria.</div>
+    {_table(["Metric", "Value"], late_resolution_summary_rows)}
+    <h3>Late Resolution PnL Curve</h3>
+    {_render_equity_curve(late_resolution_capture_paper.get("equity_curve", []) if isinstance(late_resolution_capture_paper.get("equity_curve"), list) else [], float(late_resolution_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Open Late Resolution Positions</h3>
+    {late_resolution_open_table}
+    <h3>Recent Late Resolution Closes</h3>
+    {late_resolution_close_table}
+    <h3>Recent Late Resolution Signals</h3>
+    {late_resolution_signal_table}
+    <h3>Late Resolution Skip Reasons</h3>
+    {late_resolution_reason_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
     <h2>CEX Latency Paper Bot</h2>
     <div class="sub">Research-only unless recent realized PnL and calibration justify promotion. It gathers Gamma markets, Polymarket CLOB YES/NO books, and Binance prices; entries/exits use book-level VWAP at target notional when available. It does not assume atomic YES+NO arbitrage.</div>
     {_table(["Metric", "Value"], cex_latency_summary_rows)}
@@ -2814,6 +3063,10 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {_table(["Metric", "Value"], account_reconciliation_summary_rows)}
     <h3>Recent CLOB Account Trades</h3>
     {account_reconciliation_trade_table}
+    <h3>CLOB Open Orders</h3>
+    {account_reconciliation_open_order_table}
+    <h3>CLOB Open Positions</h3>
+    {account_reconciliation_position_table}
   </div>
   <div class="panel" style="margin-top:16px;">
     <h2>Live Complete-Set Arb Pilot - Unsafe Non-Atomic Legacy</h2>
