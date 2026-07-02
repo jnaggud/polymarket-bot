@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 from ..config import LatencyBotSettings
@@ -421,6 +422,471 @@ def build_cex_latency_paper_signals(
                     "edge": round(edge, 6),
                     "eligible": True,
                     "reason": "cex-latency edge clears threshold",
+                    "blocked_reason": "",
+                }
+            )
+        results.append(signal)
+    return results
+
+
+def _book_microprice(best_bid: float, best_ask: float, bid_depth: float, ask_depth: float) -> tuple[float, float]:
+    if best_bid <= 0.0 or best_ask <= 0.0:
+        return 0.5, 0.0
+    total_depth = max(float(bid_depth) + float(ask_depth), 0.0)
+    mid = (best_bid + best_ask) / 2.0
+    if total_depth <= 0.0:
+        return mid, 0.0
+    imbalance = (float(bid_depth) - float(ask_depth)) / total_depth
+    spread = max(best_ask - best_bid, 0.0)
+    return _clamp_probability(mid + imbalance * (spread / 2.0)), imbalance
+
+
+def build_btc_fair_value_paper_signals(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    fair_values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not settings.btc_fair_value_paper_enabled:
+        return []
+    allowed_assets = {str(asset).lower() for asset in settings.btc_fair_value_paper_assets}
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_id = {str(item.get("market_id") or ""): item for item in markets if isinstance(item, dict)}
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    raw_market_weight = max(float(settings.btc_fair_value_paper_market_weight), 0.0)
+    raw_micro_weight = max(float(settings.btc_fair_value_paper_microprice_weight), 0.0)
+    raw_binance_weight = max(float(settings.btc_fair_value_paper_binance_weight), 0.0)
+    weight_sum = raw_market_weight + raw_micro_weight + raw_binance_weight
+    if weight_sum <= 0.0:
+        raw_market_weight, raw_micro_weight, raw_binance_weight, weight_sum = 0.45, 0.25, 0.30, 1.0
+    market_weight = raw_market_weight / weight_sum
+    micro_weight = raw_micro_weight / weight_sum
+    binance_weight = raw_binance_weight / weight_sum
+    results: list[dict[str, Any]] = []
+    for fair in fair_values:
+        if not isinstance(fair, dict):
+            continue
+        market_id = str(fair.get("market_id") or "")
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        if market is None or cache is None:
+            continue
+        asset = str(fair.get("asset") or "").lower()
+        tenor = int(market.get("tenor_minutes") or 0)
+        best_bid = float(cache.get("best_bid") or 0.0)
+        best_ask = float(cache.get("best_ask") or 0.0)
+        no_bid = float(cache.get("no_best_bid") or max(1.0 - best_ask, 0.0))
+        no_ask = float(cache.get("no_best_ask") or max(1.0 - best_bid, 0.0))
+        yes_entry_price = float(cache.get("ask_vwap") or best_ask)
+        no_entry_price = float(cache.get("no_ask_vwap") or no_ask)
+        yes_entry_depth_usdc = float(cache.get("ask_fillable_usdc") or cache.get("asks_depth_usdc") or 0.0)
+        no_entry_depth_usdc = float(cache.get("no_ask_fillable_usdc") or cache.get("no_asks_depth_usdc") or 0.0)
+        bid_depth = float(cache.get("bids_depth_usdc") or cache.get("bid_depth_usdc") or 0.0)
+        ask_depth = float(cache.get("asks_depth_usdc") or cache.get("ask_depth_usdc") or 0.0)
+        yes_mid = (best_bid + best_ask) / 2.0 if best_bid > 0.0 and best_ask > 0.0 else 0.5
+        micro_yes, imbalance = _book_microprice(best_bid, best_ask, bid_depth, ask_depth)
+        raw_fair_yes = _clamp_probability(float(fair.get("fair_yes") or 0.5))
+        # The Binance component is the external directional prior; if the
+        # current fair model is weak it naturally shrinks back toward 50/50.
+        binance_directional_fair = _clamp_probability(0.5 + 0.85 * (raw_fair_yes - 0.5))
+        fair_yes = _clamp_probability(
+            market_weight * yes_mid + micro_weight * micro_yes + binance_weight * binance_directional_fair
+        )
+        fair_no = 1.0 - fair_yes
+        yes_edge = fair_yes - (yes_entry_price + settings.taker_fee_per_share + settings.taker_slippage_per_share)
+        no_edge = fair_no - (no_entry_price + settings.taker_fee_per_share + settings.taker_slippage_per_share)
+        side = "YES" if yes_edge >= no_edge else "NO"
+        entry_price = yes_entry_price if side == "YES" else no_entry_price
+        entry_depth_usdc = yes_entry_depth_usdc if side == "YES" else no_entry_depth_usdc
+        edge = yes_edge if side == "YES" else no_edge
+        confidence = abs(fair_yes - 0.5) + 0.25 * abs(imbalance)
+        book_age_ms = float(cache.get("book_age_ms") or 0.0)
+        seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
+        reference_price = float(fair.get("reference_price") or 0.0)
+        volatility = float(fair.get("volatility") or 0.0)
+        signal = {
+            "market_id": market_id,
+            "asset": asset,
+            "tenor_minutes": tenor,
+            "fair_yes": fair_yes,
+            "fair_no": fair_no,
+            "yes_bid": best_bid,
+            "yes_ask": best_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "min_depth_usdc": entry_depth_usdc,
+            "book_age_ms": book_age_ms,
+            "seconds_left": seconds_left,
+            "reference_price": reference_price,
+            "volatility": volatility,
+            "signal_type": "BTC_FAIR_VALUE_SKIP",
+            "mode": "btc_fair_value_paper",
+            "edge": round(max(edge, 0.0), 6),
+            "eligible": False,
+            "reason": "btc fair-value edge below threshold",
+            "blocked_reason": "edge",
+            "side": side,
+            "order_price": entry_price,
+        }
+        if asset not in allowed_assets:
+            signal.update({"reason": "asset disabled", "blocked_reason": "asset", "edge": 0.0})
+        elif seconds_left <= settings.btc_fair_value_paper_force_exit_seconds:
+            signal.update({"reason": "too close to expiry", "blocked_reason": "time_to_expiry", "edge": 0.0})
+        elif seconds_left < settings.btc_fair_value_paper_min_seconds_left:
+            signal.update({"reason": "entry too close to expiry", "blocked_reason": "entry_time_to_expiry", "edge": 0.0})
+        elif seconds_left > settings.btc_fair_value_paper_max_seconds_left:
+            signal.update({"reason": "too far from expiry", "blocked_reason": "max_time_to_expiry", "edge": 0.0})
+        elif confidence < settings.btc_fair_value_paper_min_model_confidence:
+            signal.update({"reason": "model confidence below threshold", "blocked_reason": "model_confidence", "edge": 0.0})
+        elif entry_depth_usdc < settings.btc_fair_value_paper_min_depth_usdc:
+            signal.update({"reason": "insufficient visible depth", "blocked_reason": "min_book_depth", "edge": 0.0})
+        elif book_age_ms > settings.btc_fair_value_paper_max_book_age_ms:
+            signal.update({"reason": "book snapshot too stale", "blocked_reason": "book_age", "edge": 0.0})
+        elif entry_price < settings.btc_fair_value_paper_min_trade_price or entry_price > settings.btc_fair_value_paper_max_trade_price:
+            signal.update({"reason": "price outside btc fair-value band", "blocked_reason": "trade_price_band"})
+        elif edge >= settings.btc_fair_value_paper_min_edge_per_share:
+            signal.update(
+                {
+                    "signal_type": f"BTC_FAIR_VALUE_TAKE_{side}",
+                    "edge": round(edge, 6),
+                    "eligible": True,
+                    "reason": "btc fair-value edge clears threshold",
+                    "blocked_reason": "",
+                }
+            )
+        results.append(signal)
+    return results
+
+
+def build_temporal_inventory_maker_paper_signals(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    fair_values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not settings.temporal_inventory_maker_paper_enabled:
+        return []
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_id = {str(item.get("market_id") or ""): item for item in markets if isinstance(item, dict)}
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    fair_by_asset_tenor: dict[tuple[str, int], list[float]] = {}
+    for fair in fair_values:
+        if not isinstance(fair, dict):
+            continue
+        market = market_by_id.get(str(fair.get("market_id") or ""))
+        if not market:
+            continue
+        asset = str(fair.get("asset") or market.get("asset") or "").lower()
+        tenor = int(market.get("tenor_minutes") or 0)
+        fair_by_asset_tenor.setdefault((asset, tenor), []).append(_clamp_probability(float(fair.get("fair_yes") or 0.5)))
+
+    max_book_age_ms = max(float(settings.feed_max_polymarket_staleness_seconds) * 1000.0, 1.0)
+    min_edge = max(float(settings.temporal_inventory_maker_paper_min_net_edge), 0.0)
+    quote_notional = max(float(settings.temporal_inventory_maker_paper_base_order_usdc), 0.0)
+    results: list[dict[str, Any]] = []
+    for fair in fair_values:
+        if not isinstance(fair, dict):
+            continue
+        market_id = str(fair.get("market_id") or "")
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        if market is None or cache is None:
+            continue
+        asset = str(fair.get("asset") or market.get("asset") or "").lower()
+        tenor = int(market.get("tenor_minutes") or 0)
+        best_bid = float(cache.get("best_bid") or 0.0)
+        best_ask = float(cache.get("best_ask") or 0.0)
+        no_bid = float(cache.get("no_best_bid") or max(1.0 - best_ask, 0.0))
+        no_ask = float(cache.get("no_best_ask") or max(1.0 - best_bid, 0.0))
+        bid_depth = float(cache.get("bids_depth_usdc") or cache.get("bid_depth_usdc") or 0.0)
+        ask_depth = float(cache.get("asks_depth_usdc") or cache.get("ask_depth_usdc") or 0.0)
+        yes_mid = (best_bid + best_ask) / 2.0 if best_bid > 0.0 and best_ask > 0.0 else 0.5
+        micro_yes, imbalance = _book_microprice(best_bid, best_ask, bid_depth, ask_depth)
+        raw_fair_yes = _clamp_probability(float(fair.get("fair_yes") or 0.5))
+        spread = max(best_ask - best_bid, 0.0) if best_ask > 0.0 and best_bid > 0.0 else 1.0
+        book_age_ms = float(cache.get("book_age_ms") or 0.0)
+        staleness = min(max(book_age_ms / max_book_age_ms, 0.0), 2.0)
+        related_conflict = 0.0
+        related_values: list[float] = []
+        for (other_asset, other_tenor), values in fair_by_asset_tenor.items():
+            if other_asset == asset and other_tenor != tenor:
+                related_values.extend(values)
+        if related_values:
+            related_avg = sum(related_values) / len(related_values)
+            related_conflict = abs(raw_fair_yes - related_avg)
+        shrink = min(0.55, 0.18 * staleness + 2.0 * max(spread - 0.02, 0.0) + 0.55 * max(related_conflict - 0.06, 0.0))
+        blended_yes = _clamp_probability(0.56 * raw_fair_yes + 0.24 * micro_yes + 0.20 * yes_mid)
+        fair_yes = _clamp_probability(0.5 + (1.0 - shrink) * (blended_yes - 0.5))
+        fair_no = 1.0 - fair_yes
+        uncertainty = 0.008 + 0.35 * spread + 0.010 * min(staleness, 1.5) + 0.25 * related_conflict
+        adverse_buffer = max(0.004, spread * 0.25) + float(settings.taker_fee_per_share or 0.0)
+
+        def maker_quote(best_bid_value: float, best_ask_value: float, side_fair: float) -> tuple[float, float]:
+            if side_fair <= 0.0 or best_bid_value <= 0.0:
+                return 0.0, -1.0
+            tick = 0.01
+            post_only_ceiling = best_ask_value - tick if best_ask_value > tick else best_bid_value
+            fair_ceiling = side_fair - min_edge - adverse_buffer - uncertainty
+            quote_price = min(best_bid_value + tick, post_only_ceiling, fair_ceiling)
+            if quote_price <= 0.0:
+                return 0.0, -1.0
+            quote_price = round(max(quote_price, 0.01), 4)
+            net_edge = side_fair - quote_price - adverse_buffer - uncertainty
+            return quote_price, net_edge
+
+        yes_quote, yes_edge = maker_quote(best_bid, best_ask, fair_yes)
+        no_quote, no_edge = maker_quote(no_bid, no_ask, fair_no)
+        side = "YES" if yes_edge >= no_edge else "NO"
+        order_price = yes_quote if side == "YES" else no_quote
+        edge = yes_edge if side == "YES" else no_edge
+        side_fair = fair_yes if side == "YES" else fair_no
+        seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
+        size = quote_notional / order_price if order_price > 0.0 and quote_notional > 0.0 else 0.0
+        signal = {
+            "market_id": market_id,
+            "asset": asset,
+            "tenor_minutes": tenor,
+            "fair_yes": fair_yes,
+            "fair_no": fair_no,
+            "yes_bid": best_bid,
+            "yes_ask": best_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "min_depth_usdc": float(cache.get("min_depth_usdc") or 0.0),
+            "book_age_ms": book_age_ms,
+            "seconds_left": seconds_left,
+            "reference_price": float(fair.get("reference_price") or 0.0),
+            "volatility": float(fair.get("volatility") or 0.0),
+            "signal_type": "TEMPORAL_INVENTORY_SKIP",
+            "mode": "temporal_inventory_maker_paper",
+            "edge": round(max(edge, 0.0), 6),
+            "eligible": False,
+            "reason": "temporal inventory maker edge below threshold",
+            "blocked_reason": "edge",
+            "side": side,
+            "order_price": order_price,
+            "quote_size": size,
+            "side_fair": side_fair,
+            "adverse_selection_buffer": round(adverse_buffer, 6),
+            "model_uncertainty": round(uncertainty, 6),
+            "book_imbalance": round(imbalance, 6),
+            "related_conflict": round(related_conflict, 6),
+        }
+        if seconds_left <= settings.temporal_inventory_maker_paper_force_exit_seconds:
+            signal.update({"reason": "too close to expiry", "blocked_reason": "time_to_expiry", "edge": 0.0})
+        elif book_age_ms > max_book_age_ms:
+            signal.update({"reason": "book snapshot too stale", "blocked_reason": "book_age", "edge": 0.0})
+        elif best_bid <= 0.0 or best_ask <= 0.0 or no_bid <= 0.0 or no_ask <= 0.0:
+            signal.update({"reason": "incomplete YES/NO book", "blocked_reason": "book"})
+        elif order_price <= 0.0 or size <= 0.0:
+            signal.update({"reason": "no valid post-only quote price", "blocked_reason": "quote_price", "edge": 0.0})
+        elif edge >= min_edge:
+            signal.update(
+                {
+                    "signal_type": f"TEMPORAL_INVENTORY_MAKE_{side}",
+                    "edge": round(edge, 6),
+                    "eligible": True,
+                    "reason": "temporal inventory maker edge clears threshold",
+                    "blocked_reason": "",
+                }
+            )
+        results.append(signal)
+    return results
+
+
+def _wallet_trade_ts(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        if value > 10_000_000_000:
+            value /= 1000.0
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return _wallet_trade_ts(float(text))
+    text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _wallet_trade_outcome(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    if text in {"up", "yes"}:
+        return "YES"
+    if text in {"down", "no"}:
+        return "NO"
+    return ""
+
+
+def build_wallet_teacher_sniper_signals(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    wallet_trades_payload: dict[str, Any],
+    ts: datetime | None = None,
+) -> list[dict[str, Any]]:
+    if not settings.wallet_teacher_sniper_enabled:
+        return []
+    now = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    allowed_assets = {str(asset).lower() for asset in settings.wallet_teacher_sniper_assets}
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_slug = {
+        str(item.get("slug") or "").lower(): item
+        for item in markets
+        if isinstance(item, dict) and str(item.get("slug") or "")
+    }
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    trades = wallet_trades_payload.get("items", []) if isinstance(wallet_trades_payload.get("items"), list) else []
+    lookback = max(float(settings.wallet_teacher_sniper_trade_lookback_seconds or 0), 1.0)
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        if str(trade.get("side") or "").upper() != "BUY":
+            continue
+        slug = str(trade.get("slug") or "").lower()
+        market = market_by_slug.get(slug)
+        if market is None:
+            continue
+        trade_ts = _wallet_trade_ts(trade.get("timestamp") or trade.get("created_at") or trade.get("time"))
+        if trade_ts is None:
+            continue
+        age_seconds = (now - trade_ts).total_seconds()
+        if age_seconds < 0 or age_seconds > lookback:
+            continue
+        side = _wallet_trade_outcome(trade.get("outcome"))
+        if not side:
+            side = "YES" if int(trade.get("outcome_index") or -1) == 0 else "NO" if int(trade.get("outcome_index") or -1) == 1 else ""
+        if side not in {"YES", "NO"}:
+            continue
+        try:
+            price = float(trade.get("price") or 0.0)
+            size = float(trade.get("size") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        notional = price * size
+        if notional < float(settings.wallet_teacher_sniper_min_teacher_notional_usdc):
+            continue
+        market_id = str(market.get("market_id") or "")
+        key = (market_id, side)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "market": market,
+                "side": side,
+                "teacher_notional": 0.0,
+                "teacher_size": 0.0,
+                "teacher_trade_count": 0,
+                "latest_trade_ts": trade_ts,
+                "weighted_price_sum": 0.0,
+            },
+        )
+        bucket["teacher_notional"] += notional
+        bucket["teacher_size"] += size
+        bucket["teacher_trade_count"] += 1
+        bucket["weighted_price_sum"] += price * notional
+        if trade_ts > bucket["latest_trade_ts"]:
+            bucket["latest_trade_ts"] = trade_ts
+
+    results: list[dict[str, Any]] = []
+    for (market_id, side), bucket in grouped.items():
+        market = bucket["market"]
+        cache = cache_by_id.get(market_id)
+        if cache is None:
+            continue
+        asset = str(market.get("asset") or "").lower()
+        tenor = int(market.get("tenor_minutes") or 0)
+        best_bid = float(cache.get("best_bid") or 0.0)
+        best_ask = float(cache.get("best_ask") or 0.0)
+        no_bid = float(cache.get("no_best_bid") or max(1.0 - best_ask, 0.0))
+        no_ask = float(cache.get("no_best_ask") or max(1.0 - best_bid, 0.0))
+        entry_price = float(cache.get("ask_vwap") or best_ask) if side == "YES" else float(cache.get("no_ask_vwap") or no_ask)
+        entry_depth_usdc = (
+            float(cache.get("ask_fillable_usdc") or cache.get("asks_depth_usdc") or cache.get("min_depth_usdc") or 0.0)
+            if side == "YES"
+            else float(cache.get("no_ask_fillable_usdc") or cache.get("no_asks_depth_usdc") or cache.get("min_depth_usdc") or 0.0)
+        )
+        seconds_left = 0.0
+        raw_expiry = str(market.get("expiry_ts") or "")
+        if raw_expiry:
+            expiry_text = raw_expiry[:-1] + "+00:00" if raw_expiry.endswith("Z") else raw_expiry
+            try:
+                expiry = datetime.fromisoformat(expiry_text)
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                seconds_left = max((expiry.astimezone(timezone.utc) - now).total_seconds(), 0.0)
+            except ValueError:
+                seconds_left = 0.0
+        book_age_ms = float(cache.get("book_age_ms") or 0.0)
+        teacher_notional = float(bucket.get("teacher_notional") or 0.0)
+        teacher_size = float(bucket.get("teacher_size") or 0.0)
+        teacher_avg_price = (
+            float(bucket.get("weighted_price_sum") or 0.0) / teacher_notional if teacher_notional > 0.0 else 0.0
+        )
+        teacher_score = min(teacher_notional / max(float(settings.wallet_teacher_sniper_notional_usdc), 1.0), 10.0)
+        signal = {
+            "market_id": market_id,
+            "asset": asset,
+            "tenor_minutes": tenor,
+            "fair_yes": 0.5,
+            "fair_no": 0.5,
+            "yes_bid": best_bid,
+            "yes_ask": best_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "min_depth_usdc": entry_depth_usdc,
+            "book_age_ms": book_age_ms,
+            "seconds_left": seconds_left,
+            "reference_price": teacher_avg_price,
+            "volatility": teacher_size,
+            "signal_type": "WALLET_TEACHER_SKIP",
+            "mode": "wallet_teacher_sniper",
+            "edge": round(teacher_score, 6),
+            "eligible": False,
+            "reason": "wallet teacher candidate blocked",
+            "blocked_reason": "unknown",
+            "side": side,
+            "order_price": entry_price,
+        }
+        if asset not in allowed_assets:
+            signal.update({"reason": "asset disabled", "blocked_reason": "asset", "edge": 0.0})
+        elif tenor > 5:
+            signal.update({"reason": "teacher market not 5m", "blocked_reason": "tenor", "edge": 0.0})
+        elif seconds_left <= float(settings.wallet_teacher_sniper_force_exit_seconds):
+            signal.update({"reason": "too close to expiry", "blocked_reason": "time_to_expiry", "edge": 0.0})
+        elif seconds_left < float(settings.wallet_teacher_sniper_min_seconds_left):
+            signal.update({"reason": "entry too close to expiry", "blocked_reason": "entry_time_to_expiry", "edge": 0.0})
+        elif seconds_left > float(settings.wallet_teacher_sniper_max_seconds_left):
+            signal.update({"reason": "too far from expiry", "blocked_reason": "max_time_to_expiry", "edge": 0.0})
+        elif entry_depth_usdc < float(settings.wallet_teacher_sniper_min_depth_usdc):
+            signal.update({"reason": "insufficient visible depth", "blocked_reason": "min_book_depth", "edge": 0.0})
+        elif book_age_ms > float(settings.wallet_teacher_sniper_max_book_age_ms):
+            signal.update({"reason": "book snapshot too stale", "blocked_reason": "book_age", "edge": 0.0})
+        elif entry_price < float(settings.wallet_teacher_sniper_min_trade_price) or entry_price > float(settings.wallet_teacher_sniper_max_trade_price):
+            signal.update({"reason": "price outside wallet-teacher band", "blocked_reason": "trade_price_band"})
+        else:
+            signal.update(
+                {
+                    "signal_type": f"WALLET_TEACHER_TAKE_{side}",
+                    "eligible": True,
+                    "reason": "wallet teacher recent buy matched current market",
                     "blocked_reason": "",
                 }
             )

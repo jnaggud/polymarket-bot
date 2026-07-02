@@ -166,6 +166,8 @@ def refresh_polymarket_cache(settings: LatencyBotSettings, markets_payload: dict
     source_counts = {"clob_rest_book": 0, "polymarket_cli_book": 0, "shared_intraday_book_tape_fallback": 0}
     target_notional = max(
         float(getattr(settings, "cex_latency_paper_notional_usdc", 0.0) or 0.0),
+        float(getattr(settings, "btc_fair_value_paper_notional_usdc", 0.0) or 0.0),
+        float(getattr(settings, "wallet_teacher_sniper_notional_usdc", 0.0) or 0.0),
         float(getattr(settings, "paper_position_notional_usdc", 0.0) or 0.0),
         float(getattr(settings, "live_complete_set_arb_pilot_notional_usdc", 0.0) or 0.0),
     )

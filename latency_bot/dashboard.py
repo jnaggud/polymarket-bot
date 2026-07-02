@@ -18,6 +18,7 @@ from .storage import (
     connect_latency_bot_db,
     init_latency_bot_db,
     latency_bot_capital_usage,
+    latency_bot_btc_fair_value_paper_stats,
     latency_bot_cex_latency_paper_stats,
     latency_bot_equity_curve,
     latency_bot_complete_set_arb_stats,
@@ -42,6 +43,8 @@ from .storage import (
     load_shadow_open_positions,
     summarize_latency_bot_db,
     latency_bot_threshold_relaxation_stats,
+    latency_bot_temporal_inventory_maker_paper_stats,
+    latency_bot_wallet_teacher_sniper_stats,
 )
 
 
@@ -600,6 +603,9 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     shadow_stats = {} if fast else latency_bot_shadow_performance_stats(settings)
     complete_set_arb_stats = {} if fast else latency_bot_complete_set_arb_stats(settings)
     cex_latency_paper = latency_bot_cex_latency_paper_stats(settings)
+    btc_fair_value_paper = latency_bot_btc_fair_value_paper_stats(settings)
+    temporal_inventory_maker_paper = latency_bot_temporal_inventory_maker_paper_stats(settings)
+    wallet_teacher_sniper = latency_bot_wallet_teacher_sniper_stats(settings)
     realistic_complete_set_arb = {} if fast else latency_bot_realistic_complete_set_arb_sim(settings)
     preowned_inventory_arb = latency_bot_preowned_inventory_arb_sim(settings)
     realistic_complete_set_arb_all_time = (
@@ -650,6 +656,9 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         "shadow_stats": shadow_stats,
         "complete_set_arb_stats": complete_set_arb_stats,
         "cex_latency_paper": cex_latency_paper,
+        "btc_fair_value_paper": btc_fair_value_paper,
+        "temporal_inventory_maker_paper": temporal_inventory_maker_paper,
+        "wallet_teacher_sniper": wallet_teacher_sniper,
         "realistic_complete_set_arb": realistic_complete_set_arb,
         "realistic_complete_set_arb_all_time": realistic_complete_set_arb_all_time,
         "preowned_inventory_arb": preowned_inventory_arb,
@@ -703,6 +712,13 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     shadow_stats = state.get("shadow_stats", {}) if isinstance(state.get("shadow_stats"), dict) else {}
     complete_set_arb_stats = state.get("complete_set_arb_stats", {}) if isinstance(state.get("complete_set_arb_stats"), dict) else {}
     cex_latency_paper = state.get("cex_latency_paper", {}) if isinstance(state.get("cex_latency_paper"), dict) else {}
+    btc_fair_value_paper = state.get("btc_fair_value_paper", {}) if isinstance(state.get("btc_fair_value_paper"), dict) else {}
+    temporal_inventory_maker_paper = (
+        state.get("temporal_inventory_maker_paper", {})
+        if isinstance(state.get("temporal_inventory_maker_paper"), dict)
+        else {}
+    )
+    wallet_teacher_sniper = state.get("wallet_teacher_sniper", {}) if isinstance(state.get("wallet_teacher_sniper"), dict) else {}
     realistic_complete_set_arb = state.get("realistic_complete_set_arb", {}) if isinstance(state.get("realistic_complete_set_arb"), dict) else {}
     realistic_complete_set_arb_all_time = (
         state.get("realistic_complete_set_arb_all_time", {})
@@ -719,6 +735,12 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     kalshi_arb = state.get("kalshi_arb", {}) if isinstance(state.get("kalshi_arb"), dict) else {}
     capital_usage = state.get("capital_usage", {}) if isinstance(state.get("capital_usage"), dict) else {}
     cex_latency_summary = cex_latency_paper.get("summary", {}) if isinstance(cex_latency_paper.get("summary"), dict) else {}
+    btc_fair_value_summary = btc_fair_value_paper.get("summary", {}) if isinstance(btc_fair_value_paper.get("summary"), dict) else {}
+    temporal_inventory_summary = (
+        temporal_inventory_maker_paper.get("summary", {})
+        if isinstance(temporal_inventory_maker_paper.get("summary"), dict)
+        else {}
+    )
     consensus_meta = _consensus_meta_strategy_data(shadow_yes_variant_stats)
     bankroll_usdc = float(state.get("bankroll_usdc") or 10000.0)
     last_cycle_completed = _fmt_ts(status.get("last_cycle_completed_at"))
@@ -762,6 +784,29 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 f"{_fmt_num(cex_latency_summary.get('eligible_60m', 0))} / {_fmt_num(cex_latency_summary.get('signals_60m', 0))}"
             ),
         ],
+        ["BTC Fair Paper Equity", html.escape(_fmt_money(btc_fair_value_summary.get("equity_usdc", 0.0)))],
+        ["BTC Fair Paper Net PnL", html.escape(_fmt_money(btc_fair_value_summary.get("net_pnl", 0.0)))],
+        [
+            "BTC Fair Paper Open / Closed",
+            html.escape(
+                f"{_fmt_num(btc_fair_value_summary.get('open', 0))} / {_fmt_num(btc_fair_value_summary.get('closed', 0))}"
+            ),
+        ],
+        [
+            "BTC Fair Paper Eligible 60m",
+            html.escape(
+                f"{_fmt_num(btc_fair_value_summary.get('eligible_60m', 0))} / {_fmt_num(btc_fair_value_summary.get('signals_60m', 0))}"
+            ),
+        ],
+        ["Temporal Inventory Equity", html.escape(_fmt_money(temporal_inventory_summary.get("equity_usdc", 0.0)))],
+        ["Temporal Inventory Marked PnL", html.escape(_fmt_money(temporal_inventory_summary.get("marked_pnl_usdc", 0.0)))],
+        [
+            "Temporal Inventory Open / Quotes",
+            html.escape(
+                f"{_fmt_num(temporal_inventory_summary.get('open_markets', 0))} / {_fmt_num(temporal_inventory_summary.get('quote_count', 0))}"
+            ),
+        ],
+        ["Temporal Quote Fill Rate", html.escape(f"{100.0 * float(temporal_inventory_summary.get('quote_fill_rate', 0.0)):.1f}%")],
         ["Risk State", html.escape(str(status.get("risk_state", "unknown")))],
         ["Last Cycle Started (CT)", html.escape(_fmt_ts(status.get("last_cycle_started_at")))],
         ["Last Cycle Completed (CT)", html.escape(_fmt_ts(status.get("last_cycle_completed_at")))],
@@ -793,6 +838,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Shadow Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_signals", 0)))],
         ["Shadow Variant Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_variant_signals", 0)))],
         ["CEX Latency Paper Signals (60m)", html.escape(_fmt_num(recent_counts.get("cex_latency_paper_signals", 0)))],
+        ["Temporal Inventory Events (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_events", 0)))],
+        ["Temporal Inventory Quotes (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_quotes", 0)))],
         ["Complete-Set Arb Signals (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_signals", 0)))],
         ["Complete-Set Arb Closes (60m)", html.escape(_fmt_num(recent_counts.get("complete_set_arb_closes", 0)))],
         ["Live Arb Pilot Attempts (60m)", html.escape(_fmt_num(recent_counts.get("live_complete_set_arb_pilot_attempts", 0)))],
@@ -999,6 +1046,110 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     cex_latency_summary = cex_latency_paper.get("summary", {}) if isinstance(cex_latency_paper.get("summary"), dict) else {}
     cex_latency_execution_result = last_cycle_result.get("cex_latency_paper", {}) if isinstance(last_cycle_result.get("cex_latency_paper"), dict) else {}
     cex_latency_execution = cex_latency_execution_result.get("execution", {}) if isinstance(cex_latency_execution_result.get("execution"), dict) else {}
+    btc_fair_value_execution_result = last_cycle_result.get("btc_fair_value_paper", {}) if isinstance(last_cycle_result.get("btc_fair_value_paper"), dict) else {}
+    btc_fair_value_execution = btc_fair_value_execution_result.get("execution", {}) if isinstance(btc_fair_value_execution_result.get("execution"), dict) else {}
+    temporal_inventory_execution_result = (
+        last_cycle_result.get("temporal_inventory_maker_paper", {})
+        if isinstance(last_cycle_result.get("temporal_inventory_maker_paper"), dict)
+        else {}
+    )
+    temporal_inventory_execution = (
+        temporal_inventory_execution_result.get("execution", {})
+        if isinstance(temporal_inventory_execution_result.get("execution"), dict)
+        else {}
+    )
+    temporal_inventory_summary_rows = [
+        ["Mode", html.escape(str(temporal_inventory_summary.get("mode", "temporal_inventory_maker_paper")))],
+        ["Enabled", html.escape(str(bool(temporal_inventory_summary.get("enabled"))).lower())],
+        ["Starting Capital", html.escape(_fmt_money(temporal_inventory_summary.get("starting_capital_usdc", 0.0)))],
+        ["Equity", html.escape(_fmt_money(temporal_inventory_summary.get("equity_usdc", 0.0)))],
+        ["Realized PnL", html.escape(_fmt_money(temporal_inventory_summary.get("realized_pnl_usdc", 0.0)))],
+        ["Marked PnL", html.escape(_fmt_money(temporal_inventory_summary.get("marked_pnl_usdc", 0.0)))],
+        ["Locked-Pair PnL", html.escape(_fmt_money(temporal_inventory_summary.get("locked_pair_pnl_usdc", 0.0)))],
+        ["Unpaired Marked PnL", html.escape(_fmt_money(temporal_inventory_summary.get("unpaired_marked_pnl_usdc", 0.0)))],
+        ["Open Exposure", html.escape(_fmt_money(temporal_inventory_summary.get("open_exposure_usdc", 0.0)))],
+        ["Unpaired Exposure", html.escape(_fmt_money(temporal_inventory_summary.get("unpaired_exposure_usdc", 0.0)))],
+        ["Locked Pairs", html.escape(f"{float(temporal_inventory_summary.get('locked_pair_shares', 0.0)):.4f}")],
+        ["Average Pair Cost", html.escape(f"{float(temporal_inventory_summary.get('average_pair_cost', 0.0)):.4f}")],
+        ["Expired Inventory Cost", html.escape(_fmt_money(temporal_inventory_summary.get("expired_inventory_cost_usdc", 0.0)))],
+        ["Quote Fill Rate", html.escape(f"{100.0 * float(temporal_inventory_summary.get('quote_fill_rate', 0.0)):.1f}%")],
+        ["Quotes Filled / Total", html.escape(f"{_fmt_num(temporal_inventory_summary.get('quote_filled', 0))} / {_fmt_num(temporal_inventory_summary.get('quote_count', 0))}")],
+        ["Adverse-Selection Loss", html.escape(_fmt_money(temporal_inventory_summary.get("adverse_selection_loss_usdc", 0.0)))],
+        ["Win Rate", html.escape(f"{100.0 * float(temporal_inventory_summary.get('win_rate', 0.0)):.1f}%")],
+        ["Max Drawdown", html.escape(_fmt_money(temporal_inventory_summary.get("max_drawdown", 0.0)))],
+        ["24h Realized PnL", html.escape(_fmt_money(temporal_inventory_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(temporal_inventory_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(temporal_inventory_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Open Markets", html.escape(_fmt_num(temporal_inventory_summary.get("open_markets", 0)))],
+        ["Closed Markets", html.escape(_fmt_num(temporal_inventory_summary.get("closed_markets", 0)))],
+        ["Base Order", html.escape(_fmt_money(temporal_inventory_summary.get("base_order_usdc", 0.0)))],
+        ["Max Market Exposure", html.escape(_fmt_money(temporal_inventory_summary.get("max_market_exposure_usdc", 0.0)))],
+        ["Max Total Exposure", html.escape(_fmt_money(temporal_inventory_summary.get("max_total_exposure_usdc", 0.0)))],
+        ["Min Net Edge", html.escape(f"{float(temporal_inventory_summary.get('min_net_edge', 0.0)):.4f}")],
+        ["Max Pair Cost", html.escape(f"{float(temporal_inventory_summary.get('max_pair_cost', 0.0)):.4f}")],
+        ["Quote TTL", html.escape(f"{_fmt_num(temporal_inventory_summary.get('quote_ttl_seconds', 0))}s")],
+        ["Force Exit", html.escape(f"{_fmt_num(temporal_inventory_summary.get('force_exit_seconds', 0))}s")],
+        ["Daily Loss Limit", html.escape(_fmt_money(temporal_inventory_summary.get("daily_loss_limit_usdc", 0.0)))],
+        ["Last Cycle Quotes Opened", html.escape(_fmt_num(temporal_inventory_execution.get("opened_quotes_count", 0)))],
+        ["Last Cycle Quotes Filled", html.escape(_fmt_num(temporal_inventory_execution.get("filled_quotes_count", 0)))],
+        ["Last Cycle Quotes Cancelled", html.escape(_fmt_num(temporal_inventory_execution.get("cancelled_quotes_count", 0)))],
+    ]
+    temporal_inventory_market_table = _table(
+        ["Updated (CT)", "Market", "Asset", "State", "YES", "NO", "YES Cost", "NO Cost", "Pair Cost", "Locked PnL", "Realized"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("updated_ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("state", ""))),
+                html.escape(f"{float(item.get('yes_shares', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('no_shares', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("yes_cost_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("no_cost_usdc", 0.0))),
+                html.escape(f"{float(item.get('locked_pair_cost', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("locked_pair_pnl_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("realized_pnl_usdc", 0.0))),
+            ]
+            for item in temporal_inventory_maker_paper.get("markets", [])
+        ],
+    )
+    temporal_inventory_event_table = _table(
+        ["Time (CT)", "Market", "Event", "State", "Side", "Price", "Size", "Notional", "PnL", "Pair Cost", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("event_type", ""))),
+                html.escape(str(item.get("state", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('price') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('size') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("pnl_usdc", 0.0))),
+                html.escape(f"{float(item.get('pair_cost') or 0.0):.4f}"),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in temporal_inventory_maker_paper.get("recent_events", [])
+        ],
+    )
+    temporal_inventory_quote_table = _table(
+        ["Created (CT)", "Market", "Side", "Price", "Size", "Status", "Edge", "Fill", "Adverse Loss", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts_created"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(str(item.get("status", ""))),
+                html.escape(f"{float(item.get('edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('fill_price') or 0.0):.4f} / {float(item.get('fill_size') or 0.0):.4f}"),
+                html.escape(_fmt_money(item.get("adverse_selection_loss_usdc", 0.0))),
+                html.escape(str(item.get("cancel_reason") or item.get("reason") or "")),
+            ]
+            for item in temporal_inventory_maker_paper.get("recent_quotes", [])
+        ],
+    )
     cex_latency_summary_rows = [
         ["Mode", html.escape(str(cex_latency_summary.get("mode", "CEX-latency directional paper bot")))],
         ["Data Sources", html.escape(str(cex_latency_summary.get("data_sources", "")))],
@@ -1102,6 +1253,234 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
                 html.escape(f"{float(item.get('max_edge', 0.0)):.4f}"),
             ]
             for item in cex_latency_paper.get("reason_breakdown", [])
+        ],
+    )
+    btc_fair_value_summary_rows = [
+        ["Mode", html.escape(str(btc_fair_value_summary.get("mode", "BTC fair-value directional paper bot")))],
+        ["Data Sources", html.escape(str(btc_fair_value_summary.get("data_sources", "")))],
+        ["Execution Pricing", html.escape(str(btc_fair_value_summary.get("execution_pricing", "")))],
+        ["Enabled", html.escape(str(bool(btc_fair_value_summary.get("enabled"))).lower())],
+        ["Starting Capital", html.escape(_fmt_money(btc_fair_value_summary.get("starting_capital_usdc", 0.0)))],
+        ["Equity", html.escape(_fmt_money(btc_fair_value_summary.get("equity_usdc", 0.0)))],
+        ["Net PnL", html.escape(_fmt_money(btc_fair_value_summary.get("net_pnl", 0.0)))],
+        ["24h Net Revenue", html.escape(_fmt_money(btc_fair_value_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(btc_fair_value_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(btc_fair_value_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Open Positions", html.escape(_fmt_num(btc_fair_value_summary.get("open", 0)))],
+        ["Closed Trades", html.escape(_fmt_num(btc_fair_value_summary.get("closed", 0)))],
+        ["Win Rate", html.escape(f"{100.0 * float(btc_fair_value_summary.get('win_rate', 0.0)):.1f}%")],
+        ["Avg PnL / Trade", html.escape(_fmt_money(btc_fair_value_summary.get("avg_pnl", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(btc_fair_value_summary.get("max_drawdown", 0.0)))],
+        ["Current Capital In Use", html.escape(_fmt_money(btc_fair_value_summary.get("current_capital_in_use_usdc", 0.0)))],
+        ["Current Capital / Bot Bankroll", html.escape(f"{100.0 * float(btc_fair_value_summary.get('current_capital_fraction', 0.0)):.1f}%")],
+        ["Target Notional / Trade", html.escape(_fmt_money(btc_fair_value_summary.get("target_notional_usdc", 0.0)))],
+        ["Max Open Positions", html.escape(_fmt_num(btc_fair_value_summary.get("max_open_positions", 0)))],
+        ["Assets", html.escape(", ".join(str(item) for item in btc_fair_value_summary.get("assets", [])) or "-")],
+        ["Model Weights", html.escape(f"market={float(btc_fair_value_summary.get('market_weight', 0.0)):.2f}, micro={float(btc_fair_value_summary.get('microprice_weight', 0.0)):.2f}, binance={float(btc_fair_value_summary.get('binance_weight', 0.0)):.2f}")],
+        ["Min Model Confidence", html.escape(f"{float(btc_fair_value_summary.get('min_model_confidence', 0.0)):.4f}")],
+        ["Signals 60m", html.escape(_fmt_num(btc_fair_value_summary.get("signals_60m", 0)))],
+        ["Eligible 60m", html.escape(_fmt_num(btc_fair_value_summary.get("eligible_60m", 0)))],
+        ["Eligible Rate 60m", html.escape(f"{100.0 * float(btc_fair_value_summary.get('eligible_rate_60m', 0.0)):.1f}%")],
+        ["Best Edge 60m", html.escape(f"{float(btc_fair_value_summary.get('best_edge_60m', 0.0)):.4f}")],
+        ["Min Edge / Share", html.escape(f"{float(btc_fair_value_summary.get('min_edge_per_share', 0.0)):.4f}")],
+        ["Min Depth", html.escape(_fmt_money(btc_fair_value_summary.get("min_depth_usdc", 0.0)))],
+        ["Take Profit", html.escape(f"{100.0 * float(btc_fair_value_summary.get('take_profit_fraction', 0.0)):.1f}%")],
+        ["Stop Loss", html.escape(f"{100.0 * float(btc_fair_value_summary.get('stop_loss_fraction', 0.0)):.1f}%")],
+        ["Exit Edge Floor", html.escape(f"{float(btc_fair_value_summary.get('exit_edge_floor', 0.0)):.4f}")],
+        ["Force Exit", html.escape(f"{_fmt_num(btc_fair_value_summary.get('force_exit_seconds', 0))}s")],
+        ["Last Cycle Opens", html.escape(_fmt_num(btc_fair_value_execution.get("opened_positions_count", 0)))],
+        ["Last Cycle Closes", html.escape(_fmt_num(btc_fair_value_execution.get("closed_positions_count", 0)))],
+    ]
+    btc_fair_value_signal_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(str(item.get("signal_type", ""))),
+                html.escape(f"{float(item.get('edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('fair_yes', 0.0)):.3f}"),
+                html.escape(f"{float(item.get('fair_no', 0.0)):.3f}"),
+                html.escape(f"{float(item.get('order_price', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("min_depth_usdc", 0.0))),
+                html.escape(f"{float(item.get('book_age_ms', 0.0)):.0f} ms"),
+                html.escape(f"{float(item.get('seconds_left', 0.0)):.1f}"),
+                html.escape("yes" if bool(item.get("eligible")) else "no"),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in btc_fair_value_paper.get("recent_signals", [])
+        ],
+    )
+    btc_fair_value_open_table = _table(
+        ["Opened (CT)", "Market", "Asset", "Side", "Entry", "Size", "Notional", "Entry Edge", "Secs Left", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("entry_ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('entry_seconds_left', 0.0)):.1f}"),
+                html.escape(str(item.get("entry_reason", ""))),
+            ]
+            for item in btc_fair_value_paper.get("open_positions", [])
+        ],
+    )
+    btc_fair_value_close_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Entry", "Exit", "Size", "Notional", "Entry Edge", "PnL", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('exit_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("pnl", 0.0))),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in btc_fair_value_paper.get("recent_closes", [])
+        ],
+    )
+    btc_fair_value_reason_table = _table(
+        ["Reason", "Count", "Max Edge"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_edge', 0.0)):.4f}"),
+            ]
+            for item in btc_fair_value_paper.get("reason_breakdown", [])
+        ],
+    )
+    wallet_teacher_summary = (
+        wallet_teacher_sniper.get("summary", {})
+        if isinstance(wallet_teacher_sniper.get("summary"), dict)
+        else {}
+    )
+    wallet_teacher_result = (
+        last_cycle_result.get("wallet_teacher_sniper", {})
+        if isinstance(last_cycle_result.get("wallet_teacher_sniper"), dict)
+        else {}
+    )
+    wallet_teacher_execution = (
+        wallet_teacher_result.get("execution", {})
+        if isinstance(wallet_teacher_result.get("execution"), dict)
+        else {}
+    )
+    wallet_teacher_summary_rows = [
+        ["Mode", html.escape(str(wallet_teacher_summary.get("mode", "Target-wallet teacher paper bot")))],
+        ["Data Sources", html.escape(str(wallet_teacher_summary.get("data_sources", "")))],
+        ["Execution Pricing", html.escape(str(wallet_teacher_summary.get("execution_pricing", "")))],
+        ["Enabled", html.escape(str(bool(wallet_teacher_summary.get("enabled"))).lower())],
+        ["Target Wallet", html.escape(str(wallet_teacher_summary.get("target_wallet", "")))],
+        ["Starting Capital", html.escape(_fmt_money(wallet_teacher_summary.get("starting_capital_usdc", 0.0)))],
+        ["Equity", html.escape(_fmt_money(wallet_teacher_summary.get("equity_usdc", 0.0)))],
+        ["Net PnL", html.escape(_fmt_money(wallet_teacher_summary.get("net_pnl", 0.0)))],
+        ["24h Net Revenue", html.escape(_fmt_money(wallet_teacher_summary.get("realized_pnl_24h_usdc", 0.0)))],
+        ["Projected Monthly Revenue", html.escape(_fmt_money(wallet_teacher_summary.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Projected Yearly Revenue", html.escape(_fmt_money(wallet_teacher_summary.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Open Positions", html.escape(_fmt_num(wallet_teacher_summary.get("open", 0)))],
+        ["Closed Trades", html.escape(_fmt_num(wallet_teacher_summary.get("closed", 0)))],
+        ["Win Rate", html.escape(f"{100.0 * float(wallet_teacher_summary.get('win_rate', 0.0)):.1f}%")],
+        ["Avg PnL / Trade", html.escape(_fmt_money(wallet_teacher_summary.get("avg_pnl", 0.0)))],
+        ["Max Drawdown", html.escape(_fmt_money(wallet_teacher_summary.get("max_drawdown", 0.0)))],
+        ["Current Capital In Use", html.escape(_fmt_money(wallet_teacher_summary.get("current_capital_in_use_usdc", 0.0)))],
+        ["Current Capital / Bot Bankroll", html.escape(f"{100.0 * float(wallet_teacher_summary.get('current_capital_fraction', 0.0)):.1f}%")],
+        ["Target Notional / Trade", html.escape(_fmt_money(wallet_teacher_summary.get("target_notional_usdc", 0.0)))],
+        ["Max Open Positions", html.escape(_fmt_num(wallet_teacher_summary.get("max_open_positions", 0)))],
+        ["Assets", html.escape(", ".join(str(item) for item in wallet_teacher_summary.get("assets", [])) or "-")],
+        ["Signals 60m", html.escape(_fmt_num(wallet_teacher_summary.get("signals_60m", 0)))],
+        ["Eligible 60m", html.escape(_fmt_num(wallet_teacher_summary.get("eligible_60m", 0)))],
+        ["Eligible Rate 60m", html.escape(f"{100.0 * float(wallet_teacher_summary.get('eligible_rate_60m', 0.0)):.1f}%")],
+        ["Best Teacher Score 60m", html.escape(f"{float(wallet_teacher_summary.get('best_edge_60m', 0.0)):.4f}")],
+        ["Teacher Trade Lookback", html.escape(f"{_fmt_num(wallet_teacher_summary.get('teacher_trade_lookback_seconds', 0))}s")],
+        ["Min Teacher Trade Notional", html.escape(_fmt_money(wallet_teacher_summary.get("min_teacher_notional_usdc", 0.0)))],
+        ["Min Depth", html.escape(_fmt_money(wallet_teacher_summary.get("min_depth_usdc", 0.0)))],
+        ["Take Profit", html.escape(f"{100.0 * float(wallet_teacher_summary.get('take_profit_fraction', 0.0)):.1f}%")],
+        ["Stop Loss", html.escape(f"{100.0 * float(wallet_teacher_summary.get('stop_loss_fraction', 0.0)):.1f}%")],
+        ["Force Exit", html.escape(f"{_fmt_num(wallet_teacher_summary.get('force_exit_seconds', 0))}s")],
+        ["Last Cycle Opens", html.escape(_fmt_num(wallet_teacher_execution.get("opened_positions_count", 0)))],
+        ["Last Cycle Closes", html.escape(_fmt_num(wallet_teacher_execution.get("closed_positions_count", 0)))],
+    ]
+    wallet_teacher_signal_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Signal", "Teacher Score", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(str(item.get("signal_type", ""))),
+                html.escape(f"{float(item.get('edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('order_price', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("min_depth_usdc", 0.0))),
+                html.escape(f"{float(item.get('book_age_ms', 0.0)):.0f} ms"),
+                html.escape(f"{float(item.get('seconds_left', 0.0)):.1f}"),
+                html.escape("yes" if bool(item.get("eligible")) else "no"),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in wallet_teacher_sniper.get("recent_signals", [])
+            if isinstance(item, dict)
+        ],
+    )
+    wallet_teacher_open_table = _table(
+        ["Opened (CT)", "Market", "Asset", "Side", "Entry", "Size", "Notional", "Teacher Score", "Secs Left", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("entry_ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('entry_seconds_left', 0.0)):.1f}"),
+                html.escape(str(item.get("entry_reason", ""))),
+            ]
+            for item in wallet_teacher_sniper.get("open_positions", [])
+            if isinstance(item, dict)
+        ],
+    )
+    wallet_teacher_close_table = _table(
+        ["Time (CT)", "Market", "Asset", "Side", "Entry", "Exit", "Size", "Notional", "Teacher Score", "PnL", "Reason"],
+        [
+            [
+                html.escape(_fmt_ts(item.get("ts"))),
+                html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("asset", ""))),
+                html.escape(str(item.get("side", ""))),
+                html.escape(f"{float(item.get('entry_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('exit_price', 0.0)):.4f}"),
+                html.escape(f"{float(item.get('size', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("notional_usdc", 0.0))),
+                html.escape(f"{float(item.get('entry_edge', 0.0)):.4f}"),
+                html.escape(_fmt_money(item.get("pnl", 0.0))),
+                html.escape(str(item.get("reason", ""))),
+            ]
+            for item in wallet_teacher_sniper.get("recent_closes", [])
+            if isinstance(item, dict)
+        ],
+    )
+    wallet_teacher_reason_table = _table(
+        ["Reason", "Count", "Max Teacher Score"],
+        [
+            [
+                html.escape(str(item.get("reason", ""))),
+                html.escape(_fmt_num(item.get("count", 0))),
+                html.escape(f"{float(item.get('max_edge', 0.0)):.4f}"),
+            ]
+            for item in wallet_teacher_sniper.get("reason_breakdown", [])
+            if isinstance(item, dict)
         ],
     )
     cex_latency_threshold_table = _table(
@@ -2319,8 +2698,22 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {_render_variant_equity_curves(live_strategy_equity_curves, bankroll_usdc)}
   </div>
   <div class="panel" style="margin-top:16px;">
+    <h2>Temporal Inventory Maker Paper Bot</h2>
+    <div class="sub">Paper-only inventory lifecycle and simulated post-only maker quoting. It seeds one side only when modeled edge survives conservative buffers, hedges only with actually owned opposite inventory, and counts locked pairs only when owned YES/NO shares match.</div>
+    {_table(["Metric", "Value"], temporal_inventory_summary_rows)}
+    <h3>Temporal Inventory PnL Curve</h3>
+    {_render_equity_curve(temporal_inventory_maker_paper.get("equity_curve", []) if isinstance(temporal_inventory_maker_paper.get("equity_curve"), list) else [], float(temporal_inventory_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Open Lifecycle Markets</h3>
+    {temporal_inventory_market_table}
+    <h3>Recent Lifecycle Events</h3>
+    <div class="sub">Expected labels include SEED, MAKER_QUOTE, MAKER_FILL, HEDGE, LOCKED_PAIR, ROTATE, SELL, EXPIRE, and RESOLVE. CANCEL is shown when a stale simulated maker quote is pulled.</div>
+    {temporal_inventory_event_table}
+    <h3>Recent Simulated Maker Quotes</h3>
+    {temporal_inventory_quote_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
     <h2>CEX Latency Paper Bot</h2>
-    <div class="sub">Separate $1,000 paper-only directional bot. It gathers Gamma markets, Polymarket CLOB YES/NO books, and Binance prices; entries/exits use book-level VWAP at target notional when available. It does not assume atomic YES+NO arbitrage.</div>
+    <div class="sub">Research-only unless recent realized PnL and calibration justify promotion. It gathers Gamma markets, Polymarket CLOB YES/NO books, and Binance prices; entries/exits use book-level VWAP at target notional when available. It does not assume atomic YES+NO arbitrage.</div>
     {_table(["Metric", "Value"], cex_latency_summary_rows)}
     <h3>CEX Latency Paper PnL Curve</h3>
     {_render_equity_curve(cex_latency_paper.get("equity_curve", []) if isinstance(cex_latency_paper.get("equity_curve"), list) else [], float(cex_latency_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
@@ -2347,6 +2740,36 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {cex_latency_reason_table}
     <h3>Last Cycle Entry Blocks</h3>
     {cex_latency_entry_block_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>BTC Fair-Value Paper Bot</h2>
+    <div class="sub">Research-only unless profitable in live paper. It blends Binance-derived fair value, Polymarket microprice, and order-book imbalance, then paper-trades one leg at CLOB VWAP. This does not assume atomic YES+NO execution.</div>
+    {_table(["Metric", "Value"], btc_fair_value_summary_rows)}
+    <h3>BTC Fair-Value Paper PnL Curve</h3>
+    {_render_equity_curve(btc_fair_value_paper.get("equity_curve", []) if isinstance(btc_fair_value_paper.get("equity_curve"), list) else [], float(btc_fair_value_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Open BTC Fair-Value Paper Positions</h3>
+    {btc_fair_value_open_table}
+    <h3>Recent BTC Fair-Value Paper Closes</h3>
+    {btc_fair_value_close_table}
+    <h3>Recent BTC Fair-Value Paper Signals</h3>
+    {btc_fair_value_signal_table}
+    <h3>BTC Fair-Value Skip Reasons</h3>
+    {btc_fair_value_reason_table}
+  </div>
+  <div class="panel" style="margin-top:16px;">
+    <h2>Wallet Teacher Sniper Paper Bot</h2>
+    <div class="sub">Separate $1,000 paper-only target-wallet copy bot. It watches public BUY trades from the configured wallet, matches them to currently tracked 5-minute Polymarket BTC/ETH/SOL markets, and paper-enters the same side only when current CLOB depth is available. This is directional and does not assume atomic YES+NO arbitrage.</div>
+    {_table(["Metric", "Value"], wallet_teacher_summary_rows)}
+    <h3>Wallet Teacher Paper PnL Curve</h3>
+    {_render_equity_curve(wallet_teacher_sniper.get("equity_curve", []) if isinstance(wallet_teacher_sniper.get("equity_curve"), list) else [], float(wallet_teacher_summary.get("starting_capital_usdc", bankroll_usdc) or bankroll_usdc))}
+    <h3>Open Wallet Teacher Paper Positions</h3>
+    {wallet_teacher_open_table}
+    <h3>Recent Wallet Teacher Paper Closes</h3>
+    {wallet_teacher_close_table}
+    <h3>Recent Wallet Teacher Signals</h3>
+    {wallet_teacher_signal_table}
+    <h3>Wallet Teacher Skip Reasons</h3>
+    {wallet_teacher_reason_table}
   </div>
   <div class="panel" style="margin-top:16px;">
     <h2>Complete-Set Arb Prototype</h2>
@@ -2393,8 +2816,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {account_reconciliation_trade_table}
   </div>
   <div class="panel" style="margin-top:16px;">
-    <h2>Live Complete-Set Arb Pilot</h2>
-    <div class="sub">Separate guarded live-pilot tracker for the $50 Polymarket test bankroll. This pane is local ledger reconstruction only; Polymarket account cash/P&amp;L is authoritative. If Actual Locked Complete Sets is 0 and Matched Live Legs is positive, the fills were directional one-leg exposures, not locked YES+NO arbitrage.</div>
+    <h2>Live Complete-Set Arb Pilot - Unsafe Non-Atomic Legacy</h2>
+    <div class="sub">Legacy live-pilot tracker kept visible for reconciliation only. This path can create directional one-leg exposure when paired fills are not truly atomic; it is not the decision path for new live deployment. Polymarket account cash/P&amp;L is authoritative.</div>
     {_table(["Metric", "Value"], live_complete_set_pilot_summary_rows)}
     <h3>Local Matched-Leg PnL Curve (Not Account Value)</h3>
     {_render_equity_curve(live_complete_set_arb_pilot.get("equity_curve", []) if isinstance(live_complete_set_arb_pilot.get("equity_curve"), list) else [], float(live_complete_set_pilot_summary.get("simulated_or_live_capital_usdc", bankroll_usdc) or bankroll_usdc))}

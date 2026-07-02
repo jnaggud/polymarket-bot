@@ -18,6 +18,7 @@ from latency_bot.execution.paper import (
     run_complete_set_arb_paper_cycle,
     run_paper_execution_cycle,
     run_promoted_variant_paper_cycle,
+    run_temporal_inventory_maker_paper_cycle,
 )
 from latency_bot.feeds.binance import refresh_binance_cache
 from latency_bot.feeds.discovery import _normalize_latency_discovery_payload
@@ -29,6 +30,7 @@ from latency_bot.strategy.signals import (
     build_shadow_btc_no_signals,
     build_shadow_btc_yes_variant_signals,
     build_signals,
+    build_temporal_inventory_maker_paper_signals,
 )
 from latency_bot.storage import (
     append_cex_latency_paper_signals,
@@ -40,6 +42,7 @@ from latency_bot.storage import (
     latency_bot_complete_set_arb_stats,
     latency_bot_live_complete_set_arb_pilot_stats,
     latency_bot_performance_stats,
+    latency_bot_temporal_inventory_maker_paper_stats,
     load_cex_latency_paper_open_positions,
     load_open_orders,
     load_open_positions,
@@ -641,7 +644,241 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             state = build_latency_bot_dashboard_state(settings, fast=True)
             html = render_latency_bot_dashboard_html(state)
             self.assertIn("CEX Latency Paper Bot", html)
-            self.assertIn("Separate $1,000 paper-only directional bot", html)
+            self.assertIn("Research-only unless recent realized PnL", html)
+
+    def test_temporal_inventory_maker_quotes_seed_and_lock_owned_pair(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                temporal_inventory_maker_paper_enabled=True,
+                temporal_inventory_maker_paper_capital_usdc=1000.0,
+                temporal_inventory_maker_paper_base_order_usdc=50.0,
+                temporal_inventory_maker_paper_min_net_edge=0.01,
+                temporal_inventory_maker_paper_max_pair_cost=0.99,
+                temporal_inventory_maker_paper_max_market_exposure_usdc=200.0,
+                temporal_inventory_maker_paper_max_total_exposure_usdc=500.0,
+                temporal_inventory_maker_paper_quote_ttl_seconds=60,
+                temporal_inventory_maker_paper_force_exit_seconds=5,
+                taker_fee_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-5m",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+
+            def signals_for(cache: dict, fair_yes: float = 0.65) -> list[dict]:
+                return build_temporal_inventory_maker_paper_signals(
+                    settings,
+                    markets_payload=markets_payload,
+                    polymarket_cache=cache,
+                    fair_values=[
+                        {
+                            "market_id": "btc-temporal-5m",
+                            "asset": "btc",
+                            "fair_yes": fair_yes,
+                            "fair_no": 1.0 - fair_yes,
+                            "reference_price": 100.0,
+                            "volatility": 0.001,
+                            "time_to_expiry_sec": 300.0,
+                        }
+                    ],
+                )
+
+            seed_quote_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-5m",
+                        "asset": "btc",
+                        "best_bid": 0.40,
+                        "best_ask": 0.50,
+                        "no_best_bid": 0.49,
+                        "no_best_ask": 0.60,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            seed_signals = signals_for(seed_quote_cache)
+            self.assertTrue(seed_signals[0]["eligible"])
+            quote_result = run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=seed_quote_cache,
+                signals=seed_signals,
+                ts="2099-05-07T15:00:00Z",
+            )
+            self.assertEqual(quote_result["opened_quotes_count"], 1)
+
+            seed_fill_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-5m",
+                        "asset": "btc",
+                        "best_bid": 0.39,
+                        "best_ask": 0.40,
+                        "no_best_bid": 0.59,
+                        "no_best_ask": 0.61,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            fill_seed_result = run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=seed_fill_cache,
+                signals=signals_for(seed_fill_cache),
+                ts="2099-05-07T15:00:10Z",
+            )
+            self.assertEqual(fill_seed_result["filled_quotes_count"], 1)
+            stats_after_seed = latency_bot_temporal_inventory_maker_paper_stats(settings)
+            self.assertEqual(stats_after_seed["markets"][0]["state"], "SEEDED")
+            self.assertGreater(float(stats_after_seed["markets"][0]["yes_shares"]), 0.0)
+            self.assertEqual(float(stats_after_seed["markets"][0]["no_shares"]), 0.0)
+
+            hedge_quote_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-5m",
+                        "asset": "btc",
+                        "best_bid": 0.40,
+                        "best_ask": 0.50,
+                        "no_best_bid": 0.39,
+                        "no_best_ask": 0.50,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            hedge_quote_result = run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=hedge_quote_cache,
+                signals=signals_for(hedge_quote_cache),
+                ts="2099-05-07T15:00:20Z",
+            )
+            self.assertEqual(hedge_quote_result["opened_quotes_count"], 1)
+            self.assertEqual(hedge_quote_result["opened_quotes"][0]["side"], "NO")
+
+            hedge_fill_cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-5m",
+                        "asset": "btc",
+                        "best_bid": 0.40,
+                        "best_ask": 0.50,
+                        "no_best_bid": 0.38,
+                        "no_best_ask": 0.39,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            hedge_fill_result = run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=hedge_fill_cache,
+                signals=signals_for(hedge_fill_cache),
+                ts="2099-05-07T15:00:30Z",
+            )
+            self.assertEqual(hedge_fill_result["filled_quotes_count"], 1)
+            stats = latency_bot_temporal_inventory_maker_paper_stats(settings)
+            summary = stats["summary"]
+            market = stats["markets"][0]
+            self.assertEqual(market["state"], "LOCKED_PAIR")
+            self.assertAlmostEqual(float(market["yes_shares"]), float(market["no_shares"]), places=6)
+            self.assertGreater(summary["locked_pair_shares"], 0.0)
+            self.assertLess(summary["average_pair_cost"], 0.99)
+            event_types = {item["event_type"] for item in stats["recent_events"]}
+            self.assertIn("SEED", event_types)
+            self.assertIn("HEDGE", event_types)
+            self.assertIn("LOCKED_PAIR", event_types)
+
+            state = build_latency_bot_dashboard_state(settings, fast=True)
+            html = render_latency_bot_dashboard_html(state)
+            self.assertIn("Temporal Inventory Maker Paper Bot", html)
+            self.assertIn("MAKER_FILL", html)
+
+    def test_temporal_inventory_maker_cancels_stale_quote(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                temporal_inventory_maker_paper_enabled=True,
+                temporal_inventory_maker_paper_base_order_usdc=50.0,
+                temporal_inventory_maker_paper_min_net_edge=0.01,
+                temporal_inventory_maker_paper_quote_ttl_seconds=1,
+                temporal_inventory_maker_paper_force_exit_seconds=5,
+                taker_fee_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-stale",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+            cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-stale",
+                        "asset": "btc",
+                        "best_bid": 0.40,
+                        "best_ask": 0.50,
+                        "no_best_bid": 0.49,
+                        "no_best_ask": 0.60,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            signals = build_temporal_inventory_maker_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                fair_values=[
+                    {
+                        "market_id": "btc-temporal-stale",
+                        "asset": "btc",
+                        "fair_yes": 0.65,
+                        "fair_no": 0.35,
+                        "time_to_expiry_sec": 300.0,
+                    }
+                ],
+            )
+            self.assertTrue(signals[0]["eligible"])
+            run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                signals=signals,
+                ts="2099-05-07T15:00:00Z",
+            )
+            result = run_temporal_inventory_maker_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                signals=signals,
+                ts="2099-05-07T15:00:05Z",
+            )
+            self.assertEqual(result["cancelled_quotes_count"], 1)
+            stats = latency_bot_temporal_inventory_maker_paper_stats(settings)
+            self.assertGreaterEqual(stats["summary"]["quote_cancelled"], 1)
 
     def test_cex_latency_quant_poc_filters_weak_signals(self) -> None:
         with TemporaryDirectory() as tmpdir:

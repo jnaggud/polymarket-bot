@@ -311,6 +311,66 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS temporal_inventory_markets (
+        market_id TEXT PRIMARY KEY,
+        asset TEXT NOT NULL,
+        tenor_minutes INTEGER NOT NULL,
+        first_seen_ts TEXT NOT NULL,
+        updated_ts TEXT NOT NULL,
+        state TEXT NOT NULL,
+        yes_shares REAL NOT NULL DEFAULT 0.0,
+        no_shares REAL NOT NULL DEFAULT 0.0,
+        yes_cost_usdc REAL NOT NULL DEFAULT 0.0,
+        no_cost_usdc REAL NOT NULL DEFAULT 0.0,
+        realized_pnl_usdc REAL NOT NULL DEFAULT 0.0,
+        expired_inventory_cost_usdc REAL NOT NULL DEFAULT 0.0,
+        locked_pair_shares REAL NOT NULL DEFAULT 0.0,
+        locked_pair_cost REAL NOT NULL DEFAULT 0.0,
+        locked_pair_pnl_usdc REAL NOT NULL DEFAULT 0.0,
+        last_signal_side TEXT,
+        last_signal_edge REAL,
+        last_quote_id TEXT,
+        mode TEXT NOT NULL DEFAULT 'temporal_inventory_maker_paper'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS temporal_inventory_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        state TEXT NOT NULL,
+        side TEXT,
+        price REAL,
+        size REAL,
+        notional_usdc REAL,
+        pnl_usdc REAL,
+        pair_cost REAL,
+        reason TEXT,
+        metadata TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS temporal_inventory_quotes (
+        quote_id TEXT PRIMARY KEY,
+        ts_created TEXT NOT NULL,
+        ts_updated TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        notional_usdc REAL NOT NULL,
+        status TEXT NOT NULL,
+        edge REAL,
+        fill_ts TEXT,
+        fill_price REAL,
+        fill_size REAL,
+        cancel_reason TEXT,
+        adverse_selection_loss_usdc REAL NOT NULL DEFAULT 0.0,
+        reason TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS shadow_variant_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT NOT NULL,
@@ -921,6 +981,11 @@ def _ensure_query_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_cex_latency_paper_positions_status ON cex_latency_paper_positions(status)",
         "CREATE INDEX IF NOT EXISTS idx_cex_latency_paper_positions_market_ts ON cex_latency_paper_positions(market_id, entry_ts)",
         "CREATE INDEX IF NOT EXISTS idx_cex_latency_paper_events_type_ts ON cex_latency_paper_events(event_type, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_markets_state ON temporal_inventory_markets(state)",
+        "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_events_type_ts ON temporal_inventory_events(event_type, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_events_market_ts ON temporal_inventory_events(market_id, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_quotes_status ON temporal_inventory_quotes(status)",
+        "CREATE INDEX IF NOT EXISTS idx_temporal_inventory_quotes_market_ts ON temporal_inventory_quotes(market_id, ts_created)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_ts ON shadow_variant_signals(ts)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_variant ON shadow_variant_signals(variant_id)",
         "CREATE INDEX IF NOT EXISTS idx_shadow_variant_signals_variant_reason ON shadow_variant_signals(variant_id, reason)",
@@ -1034,14 +1099,17 @@ def init_latency_bot_db(settings: LatencyBotSettings) -> dict[str, Any]:
             "positions",
             "position_events",
             "risk_events",
-        "missed_opportunities",
-        "engine_cycles",
-        "equity_snapshots",
-        "shadow_signals",
-        "shadow_positions",
-        "shadow_position_events",
-    ],
-}
+            "missed_opportunities",
+            "engine_cycles",
+            "equity_snapshots",
+            "shadow_signals",
+            "shadow_positions",
+            "shadow_position_events",
+            "temporal_inventory_markets",
+            "temporal_inventory_events",
+            "temporal_inventory_quotes",
+        ],
+    }
 
 
 def record_engine_cycle(
@@ -1932,15 +2000,21 @@ def create_shadow_variant_position(
     }
 
 
-def load_cex_latency_paper_open_positions(settings: LatencyBotSettings) -> list[dict[str, Any]]:
+def load_cex_latency_paper_open_positions(
+    settings: LatencyBotSettings,
+    *,
+    mode: str = "cex_latency_paper",
+) -> list[dict[str, Any]]:
     with connect_latency_bot_db(settings) as conn:
         rows = conn.execute(
             """
             SELECT *
             FROM cex_latency_paper_positions
             WHERE status = 'open'
+              AND mode = ?
             ORDER BY entry_ts ASC
-            """
+            """,
+            (mode,),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -1955,6 +2029,7 @@ def create_cex_latency_paper_position(
     entry_price: float,
     size: float,
     signal: dict[str, Any] | None = None,
+    mode: str = "cex_latency_paper",
 ) -> dict[str, Any]:
     position_id = str(uuid.uuid4())
     notional_usdc = round(float(entry_price) * float(size), 6)
@@ -1978,7 +2053,7 @@ def create_cex_latency_paper_position(
                 float(entry_price),
                 float(size),
                 notional_usdc,
-                "cex_latency_paper",
+                mode,
                 "open",
                 str((signal or {}).get("signal_type") or ""),
                 float((signal or {}).get("edge") or 0.0),
@@ -1999,7 +2074,7 @@ def create_cex_latency_paper_position(
                 ts, position_id, event_type, mark, edge, pnl, reason
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (ts, position_id, "open", float(entry_price), float((signal or {}).get("edge") or 0.0), 0.0, "cex_latency_entry"),
+            (ts, position_id, "open", float(entry_price), float((signal or {}).get("edge") or 0.0), 0.0, f"{mode}_entry"),
         )
         conn.commit()
     return {
@@ -2010,6 +2085,7 @@ def create_cex_latency_paper_position(
         "entry_price": float(entry_price),
         "size": float(size),
         "notional_usdc": notional_usdc,
+        "mode": mode,
         "entry_edge": float((signal or {}).get("edge") or 0.0),
     }
 
@@ -2040,6 +2116,229 @@ def close_cex_latency_paper_position(
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (ts, position_id, "close", float(exit_price), edge, float(pnl), reason),
+        )
+        conn.commit()
+
+
+def load_temporal_inventory_open_markets(settings: LatencyBotSettings) -> list[dict[str, Any]]:
+    with connect_latency_bot_db(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM temporal_inventory_markets
+            WHERE state != 'CLOSED'
+            ORDER BY updated_ts ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_temporal_inventory_open_quotes(settings: LatencyBotSettings) -> list[dict[str, Any]]:
+    with connect_latency_bot_db(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM temporal_inventory_quotes
+            WHERE status = 'open'
+            ORDER BY ts_created ASC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_temporal_inventory_market(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    asset: str,
+    tenor_minutes: int,
+    state: str,
+    yes_shares: float = 0.0,
+    no_shares: float = 0.0,
+    yes_cost_usdc: float = 0.0,
+    no_cost_usdc: float = 0.0,
+    realized_pnl_usdc: float = 0.0,
+    expired_inventory_cost_usdc: float = 0.0,
+    locked_pair_shares: float = 0.0,
+    locked_pair_cost: float = 0.0,
+    locked_pair_pnl_usdc: float = 0.0,
+    last_signal_side: str = "",
+    last_signal_edge: float = 0.0,
+    last_quote_id: str = "",
+) -> dict[str, Any]:
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO temporal_inventory_markets (
+                market_id, asset, tenor_minutes, first_seen_ts, updated_ts, state,
+                yes_shares, no_shares, yes_cost_usdc, no_cost_usdc, realized_pnl_usdc,
+                expired_inventory_cost_usdc, locked_pair_shares, locked_pair_cost,
+                locked_pair_pnl_usdc, last_signal_side, last_signal_edge, last_quote_id, mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(market_id) DO UPDATE SET
+                asset = excluded.asset,
+                tenor_minutes = excluded.tenor_minutes,
+                updated_ts = excluded.updated_ts,
+                state = excluded.state,
+                yes_shares = excluded.yes_shares,
+                no_shares = excluded.no_shares,
+                yes_cost_usdc = excluded.yes_cost_usdc,
+                no_cost_usdc = excluded.no_cost_usdc,
+                realized_pnl_usdc = excluded.realized_pnl_usdc,
+                expired_inventory_cost_usdc = excluded.expired_inventory_cost_usdc,
+                locked_pair_shares = excluded.locked_pair_shares,
+                locked_pair_cost = excluded.locked_pair_cost,
+                locked_pair_pnl_usdc = excluded.locked_pair_pnl_usdc,
+                last_signal_side = excluded.last_signal_side,
+                last_signal_edge = excluded.last_signal_edge,
+                last_quote_id = excluded.last_quote_id
+            """,
+            (
+                market_id,
+                asset,
+                int(tenor_minutes),
+                ts,
+                ts,
+                state,
+                round(float(yes_shares), 8),
+                round(float(no_shares), 8),
+                round(float(yes_cost_usdc), 8),
+                round(float(no_cost_usdc), 8),
+                round(float(realized_pnl_usdc), 8),
+                round(float(expired_inventory_cost_usdc), 8),
+                round(float(locked_pair_shares), 8),
+                round(float(locked_pair_cost), 8),
+                round(float(locked_pair_pnl_usdc), 8),
+                str(last_signal_side or ""),
+                round(float(last_signal_edge), 8),
+                str(last_quote_id or ""),
+                "temporal_inventory_maker_paper",
+            ),
+        )
+        row = conn.execute("SELECT * FROM temporal_inventory_markets WHERE market_id = ?", (market_id,)).fetchone()
+        conn.commit()
+    return dict(row) if row is not None else {}
+
+
+def record_temporal_inventory_event(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    event_type: str,
+    state: str,
+    side: str = "",
+    price: float | None = None,
+    size: float | None = None,
+    notional_usdc: float | None = None,
+    pnl_usdc: float | None = None,
+    pair_cost: float | None = None,
+    reason: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO temporal_inventory_events (
+                ts, market_id, event_type, state, side, price, size, notional_usdc,
+                pnl_usdc, pair_cost, reason, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                market_id,
+                event_type,
+                state,
+                side,
+                None if price is None else float(price),
+                None if size is None else float(size),
+                None if notional_usdc is None else float(notional_usdc),
+                None if pnl_usdc is None else float(pnl_usdc),
+                None if pair_cost is None else float(pair_cost),
+                reason,
+                json.dumps(metadata or {}, sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+
+def create_temporal_inventory_quote(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    market_id: str,
+    side: str,
+    price: float,
+    size: float,
+    edge: float,
+    reason: str,
+) -> dict[str, Any]:
+    quote_id = str(uuid.uuid4())
+    notional_usdc = round(float(price) * float(size), 8)
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO temporal_inventory_quotes (
+                quote_id, ts_created, ts_updated, market_id, side, price, size,
+                notional_usdc, status, edge, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                quote_id,
+                ts,
+                ts,
+                market_id,
+                side,
+                float(price),
+                float(size),
+                notional_usdc,
+                "open",
+                float(edge),
+                reason,
+            ),
+        )
+        row = conn.execute("SELECT * FROM temporal_inventory_quotes WHERE quote_id = ?", (quote_id,)).fetchone()
+        conn.commit()
+    return dict(row) if row is not None else {}
+
+
+def close_temporal_inventory_quote(
+    settings: LatencyBotSettings,
+    *,
+    quote_id: str,
+    ts: str,
+    status: str,
+    fill_price: float | None = None,
+    fill_size: float | None = None,
+    cancel_reason: str = "",
+    adverse_selection_loss_usdc: float = 0.0,
+) -> None:
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            UPDATE temporal_inventory_quotes
+            SET status = ?,
+                ts_updated = ?,
+                fill_ts = CASE WHEN ? = 'filled' THEN ? ELSE fill_ts END,
+                fill_price = ?,
+                fill_size = ?,
+                cancel_reason = ?,
+                adverse_selection_loss_usdc = ?
+            WHERE quote_id = ?
+              AND status = 'open'
+            """,
+            (
+                status,
+                ts,
+                status,
+                ts,
+                None if fill_price is None else float(fill_price),
+                None if fill_size is None else float(fill_size),
+                cancel_reason,
+                float(adverse_selection_loss_usdc),
+                quote_id,
+            ),
         )
         conn.commit()
 
@@ -4765,6 +5064,187 @@ def latency_bot_cex_latency_paper_stats(settings: LatencyBotSettings) -> dict[st
     }
 
 
+def latency_bot_wallet_teacher_sniper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    mode = "wallet_teacher_sniper"
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
+    cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+    capital = max(float(settings.wallet_teacher_sniper_capital_usdc), 0.0)
+    with connect_latency_bot_db(settings) as conn:
+        signal_rows = conn.execute(
+            """
+            SELECT ts, market_id, asset, side, tenor_minutes, signal_type, edge, fair_yes,
+                   fair_no, yes_ask, no_ask, order_price, min_depth_usdc, book_age_ms,
+                   seconds_left, eligible, reason
+            FROM cex_latency_paper_signals
+            WHERE mode = ?
+            ORDER BY ts DESC, id DESC
+            LIMIT 50
+            """,
+            (mode,),
+        ).fetchall()
+        signal_summary_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS signals,
+                SUM(CASE WHEN eligible THEN 1 ELSE 0 END) AS eligible,
+                MAX(edge) AS best_edge
+            FROM cex_latency_paper_signals
+            WHERE mode = ?
+              AND ts >= ?
+            """,
+            (mode, cutoff_60m_ts),
+        ).fetchone()
+        reason_rows = conn.execute(
+            """
+            SELECT reason, COUNT(*) AS count, MAX(edge) AS max_edge
+            FROM cex_latency_paper_signals
+            WHERE mode = ?
+              AND ts >= ?
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            LIMIT 30
+            """,
+            (mode, cutoff_60m_ts),
+        ).fetchall()
+        open_rows = conn.execute(
+            """
+            SELECT position_id, market_id, asset, side, entry_ts, entry_price, size,
+                   notional_usdc, entry_edge, entry_seconds_left, entry_reason
+            FROM cex_latency_paper_positions
+            WHERE status = 'open'
+              AND mode = ?
+            ORDER BY entry_ts ASC
+            """,
+            (mode,),
+        ).fetchall()
+        close_rows = conn.execute(
+            """
+            SELECT
+                e.ts,
+                p.position_id,
+                p.market_id,
+                p.asset,
+                p.side,
+                p.entry_price,
+                e.mark AS exit_price,
+                p.size,
+                p.notional_usdc,
+                p.entry_edge,
+                e.edge AS exit_edge,
+                e.pnl,
+                e.reason
+            FROM cex_latency_paper_events e
+            JOIN cex_latency_paper_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close'
+              AND p.mode = ?
+            ORDER BY e.ts ASC, e.id ASC
+            """,
+            (mode,),
+        ).fetchall()
+        recent_close_rows = conn.execute(
+            """
+            SELECT
+                e.ts,
+                p.position_id,
+                p.market_id,
+                p.asset,
+                p.side,
+                p.entry_price,
+                e.mark AS exit_price,
+                p.size,
+                p.notional_usdc,
+                p.entry_edge,
+                e.edge AS exit_edge,
+                e.pnl,
+                e.reason
+            FROM cex_latency_paper_events e
+            JOIN cex_latency_paper_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close'
+              AND p.mode = ?
+            ORDER BY e.ts DESC, e.id DESC
+            LIMIT 30
+            """,
+            (mode,),
+        ).fetchall()
+
+    pnls = [float(row["pnl"] or 0.0) for row in close_rows]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    realized_24h = 0.0
+    curve: list[dict[str, Any]] = []
+    markets: set[str] = set()
+    for row in close_rows:
+        pnl = float(row["pnl"] or 0.0)
+        running = round(running + pnl, 6)
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+        markets.add(str(row["market_id"] or ""))
+        parsed_ts = _storage_parse_ts(str(row["ts"] or ""))
+        if parsed_ts is not None and parsed_ts >= cutoff_24h:
+            realized_24h = round(realized_24h + pnl, 6)
+        curve.append(
+            {
+                "ts": str(row["ts"] or ""),
+                "realized_pnl_usdc": running,
+                "unrealized_pnl_usdc": 0.0,
+                "equity_usdc": round(capital + running, 6),
+            }
+        )
+
+    signals = int(signal_summary_row["signals"] or 0) if signal_summary_row else 0
+    eligible = int(signal_summary_row["eligible"] or 0) if signal_summary_row else 0
+    open_capital = round(sum(float(row["notional_usdc"] or 0.0) for row in open_rows), 6)
+    closed = len(pnls)
+    wins = sum(1 for pnl in pnls if pnl > 0.0)
+    summary = {
+        "mode": "Target-wallet teacher 5m sniper paper bot",
+        "execution_pricing": "CLOB book-level VWAP at target notional when available",
+        "data_sources": "Public wallet trades, Gamma market discovery, Polymarket CLOB books",
+        "enabled": bool(settings.wallet_teacher_sniper_enabled),
+        "target_wallet": str(settings.wallet_teacher_sniper_wallet or ""),
+        "starting_capital_usdc": round(capital, 6),
+        "equity_usdc": round(capital + sum(pnls), 6),
+        "target_notional_usdc": round(float(settings.wallet_teacher_sniper_notional_usdc), 6),
+        "open": len(open_rows),
+        "closed": closed,
+        "unique_markets": len(markets),
+        "win_rate": round(wins / closed, 4) if closed else 0.0,
+        "wins": wins,
+        "losses": closed - wins,
+        "net_pnl": round(sum(pnls), 6),
+        "realized_pnl_24h_usdc": round(realized_24h, 6),
+        "projected_monthly_revenue_usdc": round(realized_24h * 30.0, 6),
+        "projected_yearly_revenue_usdc": round(realized_24h * 365.0, 6),
+        "avg_pnl": round(sum(pnls) / closed, 6) if closed else 0.0,
+        "max_drawdown": round(max_drawdown, 6),
+        "current_capital_in_use_usdc": open_capital,
+        "current_capital_fraction": round(open_capital / capital, 6) if capital else 0.0,
+        "signals_60m": signals,
+        "eligible_60m": eligible,
+        "eligible_rate_60m": round(eligible / signals, 4) if signals else 0.0,
+        "best_edge_60m": round(float(signal_summary_row["best_edge"] or 0.0), 6) if signal_summary_row else 0.0,
+        "teacher_trade_lookback_seconds": int(settings.wallet_teacher_sniper_trade_lookback_seconds),
+        "min_teacher_notional_usdc": round(float(settings.wallet_teacher_sniper_min_teacher_notional_usdc), 6),
+        "min_depth_usdc": round(float(settings.wallet_teacher_sniper_min_depth_usdc), 6),
+        "max_open_positions": int(settings.wallet_teacher_sniper_max_open_positions),
+        "assets": list(settings.wallet_teacher_sniper_assets),
+        "take_profit_fraction": round(float(settings.wallet_teacher_sniper_take_profit_fraction), 6),
+        "stop_loss_fraction": round(float(settings.wallet_teacher_sniper_stop_loss_fraction), 6),
+        "exit_edge_floor": round(float(settings.wallet_teacher_sniper_exit_edge_floor), 6),
+        "force_exit_seconds": int(settings.wallet_teacher_sniper_force_exit_seconds),
+    }
+    return {
+        "summary": summary,
+        "recent_signals": [dict(row) for row in signal_rows],
+        "reason_breakdown": [dict(row) for row in reason_rows],
+        "open_positions": [dict(row) for row in open_rows],
+        "recent_closes": [dict(row) for row in recent_close_rows],
+        "equity_curve": curve[-200:],
+    }
+
+
 def latency_bot_realistic_complete_set_arb_sim(settings: LatencyBotSettings) -> dict[str, Any]:
     lookback_hours = max(int(settings.realistic_complete_set_arb_lookback_hours), 1)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
@@ -5011,6 +5491,373 @@ def latency_bot_realistic_complete_set_arb_sim(settings: LatencyBotSettings) -> 
         "summary": summary,
         "recent_events": list(reversed(recent_events[-40:])),
         "reason_breakdown": reason_rows,
+        "equity_curve": curve[-200:],
+    }
+
+
+def latency_bot_btc_fair_value_paper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    mode = "btc_fair_value_paper"
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
+    cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+    capital = max(float(settings.btc_fair_value_paper_capital_usdc), 0.0)
+    with connect_latency_bot_db(settings) as conn:
+        signal_rows = conn.execute(
+            """
+            SELECT ts, market_id, asset, side, tenor_minutes, signal_type, edge, fair_yes,
+                   fair_no, yes_ask, no_ask, order_price, min_depth_usdc, book_age_ms,
+                   seconds_left, eligible, reason
+            FROM cex_latency_paper_signals
+            WHERE mode = ?
+            ORDER BY ts DESC, id DESC
+            LIMIT 50
+            """,
+            (mode,),
+        ).fetchall()
+        signal_summary_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS signals,
+                SUM(CASE WHEN eligible THEN 1 ELSE 0 END) AS eligible,
+                MAX(edge) AS best_edge
+            FROM cex_latency_paper_signals
+            WHERE mode = ? AND ts >= ?
+            """,
+            (mode, cutoff_60m_ts),
+        ).fetchone()
+        reason_rows = conn.execute(
+            """
+            SELECT reason, COUNT(*) AS count, MAX(edge) AS max_edge
+            FROM cex_latency_paper_signals
+            WHERE mode = ? AND ts >= ?
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            LIMIT 30
+            """,
+            (mode, cutoff_60m_ts),
+        ).fetchall()
+        open_rows = conn.execute(
+            """
+            SELECT position_id, market_id, asset, side, entry_ts, entry_price, size,
+                   notional_usdc, entry_edge, entry_seconds_left, entry_reason
+            FROM cex_latency_paper_positions
+            WHERE status = 'open' AND mode = ?
+            ORDER BY entry_ts ASC
+            """,
+            (mode,),
+        ).fetchall()
+        close_rows = conn.execute(
+            """
+            SELECT
+                e.ts,
+                p.position_id,
+                p.market_id,
+                p.asset,
+                p.side,
+                p.entry_price,
+                e.mark AS exit_price,
+                p.size,
+                p.notional_usdc,
+                p.entry_edge,
+                e.edge AS exit_edge,
+                e.pnl,
+                e.reason
+            FROM cex_latency_paper_events e
+            JOIN cex_latency_paper_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close' AND p.mode = ?
+            ORDER BY e.ts ASC, e.id ASC
+            """,
+            (mode,),
+        ).fetchall()
+        recent_close_rows = conn.execute(
+            """
+            SELECT
+                e.ts,
+                p.position_id,
+                p.market_id,
+                p.asset,
+                p.side,
+                p.entry_price,
+                e.mark AS exit_price,
+                p.size,
+                p.notional_usdc,
+                p.entry_edge,
+                e.edge AS exit_edge,
+                e.pnl,
+                e.reason
+            FROM cex_latency_paper_events e
+            JOIN cex_latency_paper_positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close' AND p.mode = ?
+            ORDER BY e.ts DESC, e.id DESC
+            LIMIT 30
+            """,
+            (mode,),
+        ).fetchall()
+
+    pnls = [float(row["pnl"] or 0.0) for row in close_rows]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    realized_24h = 0.0
+    curve: list[dict[str, Any]] = []
+    markets: set[str] = set()
+    for row in close_rows:
+        pnl = float(row["pnl"] or 0.0)
+        running = round(running + pnl, 6)
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+        markets.add(str(row["market_id"] or ""))
+        parsed_ts = _storage_parse_ts(str(row["ts"] or ""))
+        if parsed_ts is not None and parsed_ts >= cutoff_24h:
+            realized_24h = round(realized_24h + pnl, 6)
+        curve.append(
+            {
+                "ts": str(row["ts"] or ""),
+                "realized_pnl_usdc": running,
+                "unrealized_pnl_usdc": 0.0,
+                "equity_usdc": round(capital + running, 6),
+            }
+        )
+
+    signals = int(signal_summary_row["signals"] or 0) if signal_summary_row else 0
+    eligible = int(signal_summary_row["eligible"] or 0) if signal_summary_row else 0
+    open_capital = round(sum(float(row["notional_usdc"] or 0.0) for row in open_rows), 6)
+    closed = len(pnls)
+    wins = sum(1 for pnl in pnls if pnl > 0.0)
+    summary = {
+        "mode": "BTC fair-value directional paper bot",
+        "execution_pricing": "single-leg CLOB book-level VWAP; no YES+NO atomic assumption",
+        "data_sources": "Polymarket CLOB books, Binance-derived fair values, order-book microprice/imbalance",
+        "enabled": bool(settings.btc_fair_value_paper_enabled),
+        "starting_capital_usdc": round(capital, 6),
+        "equity_usdc": round(capital + sum(pnls), 6),
+        "target_notional_usdc": round(float(settings.btc_fair_value_paper_notional_usdc), 6),
+        "open": len(open_rows),
+        "closed": closed,
+        "unique_markets": len(markets),
+        "win_rate": round(wins / closed, 4) if closed else 0.0,
+        "wins": wins,
+        "losses": closed - wins,
+        "net_pnl": round(sum(pnls), 6),
+        "realized_pnl_24h_usdc": round(realized_24h, 6),
+        "projected_monthly_revenue_usdc": round(realized_24h * 30.0, 6),
+        "projected_yearly_revenue_usdc": round(realized_24h * 365.0, 6),
+        "avg_pnl": round(sum(pnls) / closed, 6) if closed else 0.0,
+        "max_drawdown": round(max_drawdown, 6),
+        "current_capital_in_use_usdc": open_capital,
+        "current_capital_fraction": round(open_capital / capital, 6) if capital else 0.0,
+        "signals_60m": signals,
+        "eligible_60m": eligible,
+        "eligible_rate_60m": round(eligible / signals, 4) if signals else 0.0,
+        "best_edge_60m": round(float(signal_summary_row["best_edge"] or 0.0), 6) if signal_summary_row else 0.0,
+        "min_edge_per_share": round(float(settings.btc_fair_value_paper_min_edge_per_share), 6),
+        "min_depth_usdc": round(float(settings.btc_fair_value_paper_min_depth_usdc), 6),
+        "max_open_positions": int(settings.btc_fair_value_paper_max_open_positions),
+        "assets": list(settings.btc_fair_value_paper_assets),
+        "market_weight": round(float(settings.btc_fair_value_paper_market_weight), 6),
+        "microprice_weight": round(float(settings.btc_fair_value_paper_microprice_weight), 6),
+        "binance_weight": round(float(settings.btc_fair_value_paper_binance_weight), 6),
+        "min_model_confidence": round(float(settings.btc_fair_value_paper_min_model_confidence), 6),
+        "take_profit_fraction": round(float(settings.btc_fair_value_paper_take_profit_fraction), 6),
+        "stop_loss_fraction": round(float(settings.btc_fair_value_paper_stop_loss_fraction), 6),
+        "exit_edge_floor": round(float(settings.btc_fair_value_paper_exit_edge_floor), 6),
+        "force_exit_seconds": int(settings.btc_fair_value_paper_force_exit_seconds),
+    }
+    return {
+        "summary": summary,
+        "recent_signals": [dict(row) for row in signal_rows],
+        "reason_breakdown": [dict(row) for row in reason_rows],
+        "open_positions": [dict(row) for row in open_rows],
+        "recent_closes": [dict(row) for row in recent_close_rows],
+        "equity_curve": curve[-200:],
+    }
+
+
+def latency_bot_temporal_inventory_maker_paper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
+    cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+    capital = max(float(settings.temporal_inventory_maker_paper_capital_usdc), 0.0)
+    with connect_latency_bot_db(settings) as conn:
+        market_rows = conn.execute(
+            """
+            SELECT *
+            FROM temporal_inventory_markets
+            ORDER BY updated_ts DESC
+            """
+        ).fetchall()
+        event_rows = conn.execute(
+            """
+            SELECT ts, market_id, event_type, state, side, price, size, notional_usdc,
+                   pnl_usdc, pair_cost, reason
+            FROM temporal_inventory_events
+            ORDER BY ts DESC, id DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        quote_rows = conn.execute(
+            """
+            SELECT quote_id, ts_created, ts_updated, market_id, side, price, size,
+                   notional_usdc, status, edge, fill_price, fill_size, cancel_reason,
+                   adverse_selection_loss_usdc, reason
+            FROM temporal_inventory_quotes
+            ORDER BY ts_created DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        quote_summary = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS quotes,
+                SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) AS filled,
+                SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                SUM(adverse_selection_loss_usdc) AS adverse_selection_loss
+            FROM temporal_inventory_quotes
+            """
+        ).fetchone()
+        quote_summary_60m = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS quotes,
+                SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) AS filled
+            FROM temporal_inventory_quotes
+            WHERE ts_created >= ?
+            """,
+            (cutoff_60m_ts,),
+        ).fetchone()
+        events_60m = conn.execute(
+            """
+            SELECT COUNT(*) AS events
+            FROM temporal_inventory_events
+            WHERE ts >= ?
+            """,
+            (cutoff_60m_ts,),
+        ).fetchone()
+        realized_24h_row = conn.execute(
+            """
+            SELECT SUM(COALESCE(pnl_usdc, 0.0)) AS pnl
+            FROM temporal_inventory_events
+            WHERE ts >= ?
+              AND event_type IN ('SELL', 'EXPIRE', 'RESOLVE')
+            """,
+            (cutoff_24h_ts,),
+        ).fetchone()
+
+    market_dicts = [dict(row) for row in market_rows]
+    market_ids = [str(row.get("market_id") or "") for row in market_dicts]
+    latest_books = load_latest_polymarket_books(settings, market_ids)
+
+    realized_pnl = round(sum(float(row.get("realized_pnl_usdc") or 0.0) for row in market_dicts), 6)
+    locked_pair_shares = round(sum(float(row.get("locked_pair_shares") or 0.0) for row in market_dicts), 6)
+    locked_pair_pnl = round(sum(float(row.get("locked_pair_pnl_usdc") or 0.0) for row in market_dicts), 6)
+    locked_pair_cost_sum = 0.0
+    open_exposure = 0.0
+    unpaired_exposure = 0.0
+    unpaired_marked_pnl = 0.0
+    expired_inventory_cost = 0.0
+    active_rows: list[dict[str, Any]] = []
+    for row in market_dicts:
+        state = str(row.get("state") or "")
+        yes_shares = float(row.get("yes_shares") or 0.0)
+        no_shares = float(row.get("no_shares") or 0.0)
+        yes_cost = float(row.get("yes_cost_usdc") or 0.0)
+        no_cost = float(row.get("no_cost_usdc") or 0.0)
+        avg_yes = yes_cost / yes_shares if yes_shares > 0.0 else 0.0
+        avg_no = no_cost / no_shares if no_shares > 0.0 else 0.0
+        paired = min(yes_shares, no_shares)
+        if paired > 0.0:
+            locked_pair_cost_sum += paired * (avg_yes + avg_no)
+        if state != "CLOSED":
+            active_rows.append(row)
+            open_exposure += yes_cost + no_cost
+            book = latest_books.get(str(row.get("market_id") or ""), {})
+            yes_bid = float(book.get("best_bid") or 0.0)
+            no_bid = float(book.get("no_best_bid") or 0.0)
+            if no_bid <= 0.0:
+                best_ask = float(book.get("best_ask") or 0.0)
+                no_bid = max(1.0 - best_ask, 0.0) if best_ask > 0.0 else 0.0
+            if yes_shares > no_shares:
+                excess = yes_shares - no_shares
+                excess_cost = excess * avg_yes
+                unpaired_exposure += excess_cost
+                unpaired_marked_pnl += excess * yes_bid - excess_cost
+            elif no_shares > yes_shares:
+                excess = no_shares - yes_shares
+                excess_cost = excess * avg_no
+                unpaired_exposure += excess_cost
+                unpaired_marked_pnl += excess * no_bid - excess_cost
+        expired_inventory_cost += float(row.get("expired_inventory_cost_usdc") or 0.0)
+
+    event_dicts = [dict(row) for row in reversed(event_rows)]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    curve: list[dict[str, Any]] = []
+    for row in event_dicts:
+        event_type = str(row.get("event_type") or "")
+        pnl = float(row.get("pnl_usdc") or 0.0)
+        if event_type in {"SELL", "EXPIRE", "RESOLVE", "LOCKED_PAIR"}:
+            running = round(running + pnl, 6)
+            peak = max(peak, running)
+            max_drawdown = min(max_drawdown, running - peak)
+            curve.append(
+                {
+                    "ts": str(row.get("ts") or ""),
+                    "realized_pnl_usdc": running,
+                    "unrealized_pnl_usdc": 0.0,
+                    "equity_usdc": round(capital + running, 6),
+                }
+            )
+
+    quote_count = int(quote_summary["quotes"] or 0) if quote_summary else 0
+    quote_filled = int(quote_summary["filled"] or 0) if quote_summary else 0
+    closed_rows = [row for row in market_dicts if str(row.get("state") or "") == "CLOSED"]
+    wins = sum(1 for row in closed_rows if float(row.get("realized_pnl_usdc") or 0.0) > 0.0)
+    realized_24h = float(realized_24h_row["pnl"] or 0.0) if realized_24h_row else 0.0
+    marked_net_pnl = round(realized_pnl + locked_pair_pnl + unpaired_marked_pnl, 6)
+    summary = {
+        "mode": "temporal_inventory_maker_paper",
+        "enabled": bool(settings.temporal_inventory_maker_paper_enabled),
+        "starting_capital_usdc": round(capital, 6),
+        "equity_usdc": round(capital + marked_net_pnl, 6),
+        "realized_pnl_usdc": round(realized_pnl, 6),
+        "marked_pnl_usdc": round(marked_net_pnl, 6),
+        "unpaired_marked_pnl_usdc": round(unpaired_marked_pnl, 6),
+        "locked_pair_pnl_usdc": round(locked_pair_pnl, 6),
+        "open_exposure_usdc": round(open_exposure, 6),
+        "unpaired_exposure_usdc": round(unpaired_exposure, 6),
+        "locked_pair_shares": round(locked_pair_shares, 6),
+        "average_pair_cost": round(locked_pair_cost_sum / locked_pair_shares, 6) if locked_pair_shares else 0.0,
+        "expired_inventory_cost_usdc": round(expired_inventory_cost, 6),
+        "quote_count": quote_count,
+        "quote_filled": quote_filled,
+        "quote_cancelled": int(quote_summary["cancelled"] or 0) if quote_summary else 0,
+        "quote_fill_rate": round(quote_filled / quote_count, 4) if quote_count else 0.0,
+        "adverse_selection_loss_usdc": round(float(quote_summary["adverse_selection_loss"] or 0.0), 6) if quote_summary else 0.0,
+        "quotes_60m": int(quote_summary_60m["quotes"] or 0) if quote_summary_60m else 0,
+        "quote_fills_60m": int(quote_summary_60m["filled"] or 0) if quote_summary_60m else 0,
+        "events_60m": int(events_60m["events"] or 0) if events_60m else 0,
+        "open_markets": len(active_rows),
+        "closed_markets": len(closed_rows),
+        "win_rate": round(wins / len(closed_rows), 4) if closed_rows else 0.0,
+        "max_drawdown": round(max_drawdown, 6),
+        "realized_pnl_24h_usdc": round(realized_24h, 6),
+        "projected_monthly_revenue_usdc": round(realized_24h * 30.0, 6),
+        "projected_yearly_revenue_usdc": round(realized_24h * 365.0, 6),
+        "base_order_usdc": round(float(settings.temporal_inventory_maker_paper_base_order_usdc), 6),
+        "max_market_exposure_usdc": round(float(settings.temporal_inventory_maker_paper_max_market_exposure_usdc), 6),
+        "max_total_exposure_usdc": round(float(settings.temporal_inventory_maker_paper_max_total_exposure_usdc), 6),
+        "min_net_edge": round(float(settings.temporal_inventory_maker_paper_min_net_edge), 6),
+        "max_pair_cost": round(float(settings.temporal_inventory_maker_paper_max_pair_cost), 6),
+        "quote_ttl_seconds": int(settings.temporal_inventory_maker_paper_quote_ttl_seconds),
+        "force_exit_seconds": int(settings.temporal_inventory_maker_paper_force_exit_seconds),
+        "daily_loss_limit_usdc": round(float(settings.temporal_inventory_maker_paper_daily_loss_limit_usdc), 6),
+    }
+    return {
+        "summary": summary,
+        "markets": market_dicts[:50],
+        "recent_events": [dict(row) for row in event_rows],
+        "recent_quotes": [dict(row) for row in quote_rows],
         "equity_curve": curve[-200:],
     }
 
@@ -6198,6 +7045,9 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "shadow_variant_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM shadow_variant_positions").fetchone()["count"]),
             "cex_latency_paper_signals_total": int(conn.execute("SELECT COUNT(*) AS count FROM cex_latency_paper_signals").fetchone()["count"]),
             "cex_latency_paper_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM cex_latency_paper_positions").fetchone()["count"]),
+            "temporal_inventory_markets_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_markets").fetchone()["count"]),
+            "temporal_inventory_events_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_events").fetchone()["count"]),
+            "temporal_inventory_quotes_total": int(conn.execute("SELECT COUNT(*) AS count FROM temporal_inventory_quotes").fetchone()["count"]),
             "complete_set_arb_signals_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_signals").fetchone()["count"]),
             "complete_set_arb_positions_total": int(conn.execute("SELECT COUNT(*) AS count FROM complete_set_arb_positions").fetchone()["count"]),
             "live_complete_set_arb_pilot_attempts_total": int(conn.execute("SELECT COUNT(*) AS count FROM live_complete_set_arb_pilot_attempts").fetchone()["count"]),
@@ -6220,6 +7070,8 @@ def summarize_latency_bot_db(settings: LatencyBotSettings, minutes: int = 60) ->
             "shadow_signals": count_recent("shadow_signals"),
             "shadow_variant_signals": count_recent("shadow_variant_signals"),
             "cex_latency_paper_signals": count_recent("cex_latency_paper_signals"),
+            "temporal_inventory_events": count_recent("temporal_inventory_events"),
+            "temporal_inventory_quotes": count_recent("temporal_inventory_quotes", "ts_created"),
             "complete_set_arb_signals": count_recent("complete_set_arb_signals"),
             "complete_set_arb_closes": int(complete_set_closes_row["count"]) if complete_set_closes_row else 0,
             "live_complete_set_arb_pilot_attempts": count_recent("live_complete_set_arb_pilot_attempts"),
