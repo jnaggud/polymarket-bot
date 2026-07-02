@@ -13,6 +13,7 @@ from .execution.paper import (
     run_btc_fair_value_paper_cycle,
     run_cex_latency_paper_cycle,
     run_complete_set_arb_paper_cycle,
+    run_late_resolution_capture_paper_cycle,
     run_paper_execution_cycle,
     run_promoted_variant_paper_cycle,
     run_shadow_btc_no_paper_cycle,
@@ -21,6 +22,7 @@ from .execution.paper import (
     run_wallet_teacher_sniper_paper_cycle,
 )
 from .execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
+from .execution.live_temporal_inventory_maker import run_live_temporal_inventory_maker_cycle
 from .feeds.binance import refresh_binance_cache
 from .feeds.discovery import discover_latency_markets
 from .feeds.kalshi import fetch_kalshi_arb_ticks
@@ -34,6 +36,7 @@ from .storage import (
     append_complete_set_arb_signals,
     append_fair_values,
     append_kalshi_arb_ticks,
+    append_late_resolution_capture_signals,
     append_polymarket_us_arb_ticks,
     append_signals,
     append_shadow_signals,
@@ -56,6 +59,7 @@ from .strategy.fair_value import build_fair_values
 from .strategy.signals import (
     build_btc_fair_value_paper_signals,
     build_cex_latency_paper_signals,
+    build_late_resolution_capture_paper_signals,
     build_shadow_btc_no_signals,
     build_shadow_btc_yes_variant_signals,
     build_signals,
@@ -420,6 +424,13 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         polymarket_cache=polymarket_cache,
         fair_values=fair_values,
     )
+    late_resolution_capture_paper_signals = build_late_resolution_capture_paper_signals(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        fair_values=fair_values,
+    )
+    append_late_resolution_capture_signals(settings, late_resolution_capture_paper_signals, ts=_now_iso())
     wallet_teacher_trades = fetch_wallet_teacher_trades(settings)
     wallet_teacher_sniper_signals = build_wallet_teacher_sniper_signals(
         settings,
@@ -480,6 +491,19 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         markets_payload=markets_payload,
         polymarket_cache=polymarket_cache,
         signals=temporal_inventory_maker_paper_signals,
+        ts=_now_iso(),
+    )
+    live_temporal_inventory_maker_execution = run_live_temporal_inventory_maker_cycle(
+        settings,
+        markets_payload=markets_payload,
+        signals=temporal_inventory_maker_paper_signals,
+        ts=_now_iso(),
+    )
+    late_resolution_capture_paper_execution = run_late_resolution_capture_paper_cycle(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        signals=late_resolution_capture_paper_signals,
         ts=_now_iso(),
     )
     wallet_teacher_sniper_execution = run_wallet_teacher_sniper_paper_cycle(
@@ -556,6 +580,14 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "signals_seen": len(temporal_inventory_maker_paper_signals),
             "execution": temporal_inventory_maker_paper_execution,
         },
+        "live_temporal_inventory_maker": {
+            "signals_seen": len(temporal_inventory_maker_paper_signals),
+            "execution": live_temporal_inventory_maker_execution,
+        },
+        "late_resolution_capture_paper": {
+            "signals_seen": len(late_resolution_capture_paper_signals),
+            "execution": late_resolution_capture_paper_execution,
+        },
         "wallet_teacher_sniper": {
             "signals_seen": len(wallet_teacher_sniper_signals),
             "trade_fetch_errors": list(wallet_teacher_trades.get("errors", []))[:10]
@@ -581,6 +613,8 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "Complete-set arb prototype scans paired YES/NO asks and paper-locks paired positions when net cost is below $1.",
             "CEX-latency directional paper bot runs separately with its own $1,000 paper bankroll.",
             "Temporal inventory maker paper bot is paper-only and only counts locked pairs after both sides are actually owned.",
+            "Live temporal inventory maker is fail-closed behind dry-run/live mode, reconciliation, heartbeat, cancel-all, and confirmation gates.",
+            "Late-resolution capture is a separate paper-only module with capped risk and its own PnL.",
             "Wallet-teacher sniper paper bot watches a public target wallet and paper-copies recent matching 5m market buys.",
             "Live complete-set arb pilot is tracked separately and defaults to dry-run/safety-blocked mode.",
         ],

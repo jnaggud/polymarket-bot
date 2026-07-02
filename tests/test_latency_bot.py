@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,9 +13,11 @@ from latency_bot.core import (
 )
 from latency_bot.dashboard import build_latency_bot_dashboard_state, render_latency_bot_dashboard_html
 from latency_bot.execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
+from latency_bot.execution.live_temporal_inventory_maker import run_live_temporal_inventory_maker_cycle
 from latency_bot.execution.paper import (
     run_cex_latency_paper_cycle,
     run_complete_set_arb_paper_cycle,
+    run_late_resolution_capture_paper_cycle,
     run_paper_execution_cycle,
     run_promoted_variant_paper_cycle,
     run_temporal_inventory_maker_paper_cycle,
@@ -27,6 +29,7 @@ from latency_bot.strategy.fair_value import build_fair_values, compute_updown_fa
 from latency_bot.strategy.complete_set_arb import build_complete_set_arb_signals
 from latency_bot.strategy.signals import (
     build_cex_latency_paper_signals,
+    build_late_resolution_capture_paper_signals,
     build_shadow_btc_no_signals,
     build_shadow_btc_yes_variant_signals,
     build_signals,
@@ -41,6 +44,8 @@ from latency_bot.storage import (
     latency_bot_cex_latency_paper_stats,
     latency_bot_complete_set_arb_stats,
     latency_bot_live_complete_set_arb_pilot_stats,
+    latency_bot_live_temporal_inventory_maker_stats,
+    latency_bot_late_resolution_capture_paper_stats,
     latency_bot_performance_stats,
     latency_bot_temporal_inventory_maker_paper_stats,
     load_cex_latency_paper_open_positions,
@@ -879,6 +884,199 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             self.assertEqual(result["cancelled_quotes_count"], 1)
             stats = latency_bot_temporal_inventory_maker_paper_stats(settings)
             self.assertGreaterEqual(stats["summary"]["quote_cancelled"], 1)
+
+    def test_live_temporal_inventory_maker_dry_run_records_candidate(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                live_temporal_inventory_maker_enabled=True,
+                live_temporal_inventory_maker_mode="dry_run",
+                live_temporal_inventory_maker_require_positive_paper_pnl=False,
+                live_temporal_inventory_maker_require_reconciliation=False,
+                live_temporal_inventory_maker_min_edge=0.01,
+                live_temporal_inventory_maker_min_seconds_left=0,
+                live_temporal_inventory_maker_base_order_usdc=5.0,
+                live_temporal_inventory_maker_max_open_orders=2,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-live-maker-dry-run",
+                        "asset": "btc",
+                        "yes_token_id": "yes-token",
+                        "no_token_id": "no-token",
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+            signals = [
+                {
+                    "market_id": "btc-live-maker-dry-run",
+                    "asset": "btc",
+                    "side": "YES",
+                    "eligible": True,
+                    "edge": 0.05,
+                    "order_price": 0.40,
+                    "yes_ask": 0.50,
+                    "no_ask": 0.60,
+                    "seconds_left": 300.0,
+                }
+            ]
+            result = run_live_temporal_inventory_maker_cycle(
+                settings,
+                markets_payload=markets_payload,
+                signals=signals,
+                ts="2099-05-07T15:00:00Z",
+            )
+            self.assertEqual(result["dry_run_count"], 1)
+            self.assertEqual(result["blocked_count"], 0)
+            stats = latency_bot_live_temporal_inventory_maker_stats(settings)
+            self.assertEqual(stats["summary"]["dry_run_24h"], 1)
+            self.assertEqual(stats["recent_orders"][0]["decision"], "DRY_RUN")
+
+    def test_live_temporal_inventory_maker_live_requires_confirmation(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                live_temporal_inventory_maker_enabled=True,
+                live_temporal_inventory_maker_mode="live",
+                live_temporal_inventory_maker_confirm="",
+                live_temporal_inventory_maker_require_positive_paper_pnl=False,
+                live_temporal_inventory_maker_require_reconciliation=False,
+                live_temporal_inventory_maker_min_edge=0.01,
+                live_temporal_inventory_maker_min_seconds_left=0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-live-maker-unarmed",
+                        "asset": "btc",
+                        "yes_token_id": "yes-token",
+                        "no_token_id": "no-token",
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+            signals = [
+                {
+                    "market_id": "btc-live-maker-unarmed",
+                    "asset": "btc",
+                    "side": "NO",
+                    "eligible": True,
+                    "edge": 0.05,
+                    "order_price": 0.40,
+                    "yes_ask": 0.60,
+                    "no_ask": 0.50,
+                    "seconds_left": 300.0,
+                }
+            ]
+            result = run_live_temporal_inventory_maker_cycle(
+                settings,
+                markets_payload=markets_payload,
+                signals=signals,
+                ts="2099-05-07T15:00:00Z",
+            )
+            self.assertEqual(result["submitted_count"], 0)
+            self.assertEqual(result["blocked_count"], 1)
+            self.assertIn("not armed", result["blocks"][0]["reason"])
+
+    def test_late_resolution_capture_paper_opens_and_closes(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                late_resolution_capture_paper_enabled=True,
+                late_resolution_capture_paper_notional_usdc=25.0,
+                late_resolution_capture_paper_max_market_exposure_usdc=50.0,
+                late_resolution_capture_paper_max_total_exposure_usdc=100.0,
+                late_resolution_capture_paper_min_seconds_left=1,
+                late_resolution_capture_paper_max_seconds_left=45,
+                late_resolution_capture_paper_min_official_confidence=0.97,
+                late_resolution_capture_paper_min_boundary_distance_bps=1.0,
+                late_resolution_capture_paper_min_edge=0.01,
+                taker_fee_per_share=0.0,
+                taker_slippage_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            open_expiry = (datetime.now(timezone.utc) + timedelta(seconds=20)).isoformat().replace("+00:00", "Z")
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-late-resolution",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": open_expiry,
+                    }
+                ]
+            }
+            cache = {
+                "items": [
+                    {
+                        "market_id": "btc-late-resolution",
+                        "asset": "btc",
+                        "best_bid": 0.88,
+                        "best_ask": 0.90,
+                        "no_best_bid": 0.09,
+                        "no_best_ask": 0.11,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            fair_values = [
+                {
+                    "market_id": "btc-late-resolution",
+                    "asset": "btc",
+                    "fair_yes": 0.997,
+                    "fair_no": 0.003,
+                    "reference_price": 100.0,
+                    "current_price": 101.0,
+                    "time_to_expiry_sec": 20.0,
+                }
+            ]
+            signals = build_late_resolution_capture_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                fair_values=fair_values,
+            )
+            self.assertTrue(signals[0]["eligible"])
+            open_result = run_late_resolution_capture_paper_cycle(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                signals=signals,
+                ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+            self.assertEqual(open_result["opened_positions_count"], 1)
+
+            expired_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-late-resolution",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+                    }
+                ]
+            }
+            close_result = run_late_resolution_capture_paper_cycle(
+                settings,
+                markets_payload=expired_payload,
+                polymarket_cache=cache,
+                signals=signals,
+                ts=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+            self.assertEqual(close_result["closed_positions_count"], 1)
+            stats = latency_bot_late_resolution_capture_paper_stats(settings)
+            self.assertEqual(stats["summary"]["closed"], 1)
+            self.assertGreater(stats["summary"]["net_pnl"], 0.0)
+
+            state = build_latency_bot_dashboard_state(settings, fast=True)
+            html = render_latency_bot_dashboard_html(state)
+            self.assertIn("Late Resolution Capture Paper", html)
+            self.assertIn("Live Temporal Inventory Maker", html)
 
     def test_cex_latency_quant_poc_filters_weak_signals(self) -> None:
         with TemporaryDirectory() as tmpdir:

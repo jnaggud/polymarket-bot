@@ -8,6 +8,7 @@ from ..risk.limits import can_open_new_position
 from ..storage import (
     cancel_order,
     close_cex_latency_paper_position,
+    close_late_resolution_capture_position,
     close_temporal_inventory_quote,
     close_position,
     close_complete_set_arb_position,
@@ -15,6 +16,7 @@ from ..storage import (
     close_shadow_variant_position,
     connect_latency_bot_db,
     create_cex_latency_paper_position,
+    create_late_resolution_capture_position,
     create_order,
     create_complete_set_arb_position,
     create_position,
@@ -24,6 +26,7 @@ from ..storage import (
     fill_open_order_as_position,
     load_latest_polymarket_books,
     load_cex_latency_paper_open_positions,
+    load_late_resolution_capture_open_positions,
     load_open_orders,
     load_open_positions,
     load_recent_position_closes,
@@ -1345,6 +1348,168 @@ def run_temporal_inventory_maker_paper_cycle(
         "open_markets_count": len(final_open_markets),
         "open_quotes_count": len(final_open_quotes),
         "open_exposure_usdc": round(_temporal_total_exposure(final_open_markets, final_open_quotes), 6),
+    }
+
+
+def _late_resolution_exit_price(position: dict[str, Any], cache: dict[str, Any], signal: dict[str, Any] | None) -> tuple[float, str]:
+    side = str(position.get("side") or "").upper()
+    entry_price = float(position.get("entry_price") or 0.0)
+    confidence = float((signal or {}).get("official_confidence") or position.get("entry_official_confidence") or 0.0)
+    matching_side = str((signal or {}).get("side") or "").upper() == side
+    if matching_side and confidence >= 0.995:
+        return 1.0, "high-confidence settlement proxy"
+    best_bid = float(cache.get("best_bid") or 0.0)
+    best_ask = float(cache.get("best_ask") or 0.0)
+    no_bid = float(cache.get("no_best_bid") or max(1.0 - best_ask, 0.0))
+    bid = best_bid if side == "YES" else no_bid
+    if bid > 0.0:
+        return bid, "bid-side forced exit"
+    return max(min(entry_price * 0.25, 1.0), 0.0), "no bid; conservative residual mark"
+
+
+def _late_resolution_daily_realized_pnl(settings: LatencyBotSettings) -> float:
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    with connect_latency_bot_db(settings) as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(pnl), 0.0) AS pnl
+            FROM late_resolution_capture_events
+            WHERE event_type = 'close'
+              AND ts >= ?
+            """,
+            (cutoff_ts,),
+        ).fetchone()
+    return float(row["pnl"] or 0.0) if row is not None else 0.0
+
+
+def run_late_resolution_capture_paper_cycle(
+    settings: LatencyBotSettings,
+    *,
+    markets_payload: dict[str, Any],
+    polymarket_cache: dict[str, Any],
+    signals: list[dict[str, Any]],
+    ts: str,
+) -> dict[str, Any]:
+    if not settings.late_resolution_capture_paper_enabled:
+        return {
+            "opened_positions_count": 0,
+            "closed_positions_count": 0,
+            "entry_blocks_count": 0,
+            "entry_blocks": [],
+            "open_positions_count": 0,
+            "open_capital_usdc": 0.0,
+        }
+    markets = markets_payload.get("items", []) if isinstance(markets_payload.get("items"), list) else []
+    market_by_id = {str(item.get("market_id") or ""): item for item in markets if isinstance(item, dict)}
+    cache_items = polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else []
+    cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
+    signals_by_market = {str(item.get("market_id") or ""): item for item in signals if isinstance(item, dict)}
+    opened: list[dict[str, Any]] = []
+    closed: list[dict[str, Any]] = []
+    entry_blocks: list[dict[str, Any]] = []
+
+    open_positions = load_late_resolution_capture_open_positions(settings)
+    for position in open_positions:
+        market_id = str(position.get("market_id") or "")
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        signal = signals_by_market.get(market_id)
+        close_reason = ""
+        if market is None or cache is None:
+            close_reason = "market data unavailable"
+        elif _seconds_remaining(market) <= max(int(settings.late_resolution_capture_paper_min_seconds_left), 0):
+            close_reason = "late-resolution expiry window reached"
+        elif signal is not None and str(signal.get("side") or "").upper() != str(position.get("side") or "").upper() and float(signal.get("official_confidence") or 0.0) >= float(settings.late_resolution_capture_paper_min_official_confidence):
+            close_reason = "official proxy flipped against held side"
+        if not close_reason:
+            continue
+        mark, mark_reason = _late_resolution_exit_price(position, cache or {}, signal)
+        pnl = round((mark - float(position.get("entry_price") or 0.0)) * float(position.get("size") or 0.0), 6)
+        close_late_resolution_capture_position(
+            settings,
+            position_id=str(position.get("position_id") or ""),
+            ts=ts,
+            mark=mark,
+            pnl=pnl,
+            reason=f"{close_reason}; {mark_reason}",
+        )
+        closed.append({"market_id": market_id, "side": str(position.get("side") or ""), "mark": mark, "pnl": pnl, "reason": close_reason})
+
+    open_positions = load_late_resolution_capture_open_positions(settings)
+    open_by_market = {str(item.get("market_id") or ""): item for item in open_positions}
+    total_open = sum(float(item.get("notional_usdc") or 0.0) for item in open_positions)
+    open_by_market_notional: dict[str, float] = {}
+    for item in open_positions:
+        market_id = str(item.get("market_id") or "")
+        open_by_market_notional[market_id] = open_by_market_notional.get(market_id, 0.0) + float(item.get("notional_usdc") or 0.0)
+
+    daily_pnl = _late_resolution_daily_realized_pnl(settings)
+    daily_loss_limit = max(float(settings.late_resolution_capture_paper_daily_loss_limit_usdc), 0.0)
+    allow_new = daily_loss_limit <= 0.0 or daily_pnl > -daily_loss_limit
+    eligible_signals = sorted(
+        [item for item in signals if isinstance(item, dict) and bool(item.get("eligible"))],
+        key=lambda item: float(item.get("edge") or 0.0),
+        reverse=True,
+    )
+    for signal in eligible_signals:
+        market_id = str(signal.get("market_id") or "")
+        if market_id in open_by_market:
+            continue
+        if not allow_new:
+            entry_blocks.append({"market_id": market_id, "reason": "daily loss limit hit"})
+            break
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        if market is None or cache is None:
+            entry_blocks.append({"market_id": market_id, "reason": "market data unavailable"})
+            continue
+        seconds_left = _seconds_remaining(market)
+        if seconds_left < float(settings.late_resolution_capture_paper_min_seconds_left):
+            entry_blocks.append({"market_id": market_id, "reason": "too close to expiry"})
+            continue
+        if seconds_left > float(settings.late_resolution_capture_paper_max_seconds_left):
+            entry_blocks.append({"market_id": market_id, "reason": "too far from expiry"})
+            continue
+        price = float(signal.get("order_price") or 0.0)
+        if price <= 0.0:
+            entry_blocks.append({"market_id": market_id, "reason": "missing entry price"})
+            continue
+        market_open = open_by_market_notional.get(market_id, 0.0)
+        max_market = max(float(settings.late_resolution_capture_paper_max_market_exposure_usdc), 0.0)
+        max_total = max(float(settings.late_resolution_capture_paper_max_total_exposure_usdc), 0.0)
+        target = max(float(settings.late_resolution_capture_paper_notional_usdc), 0.0)
+        available_market = max(max_market - market_open, 0.0) if max_market > 0.0 else target
+        available_total = max(max_total - total_open, 0.0) if max_total > 0.0 else target
+        notional = min(target, available_market, available_total)
+        if notional < 1.0:
+            entry_blocks.append({"market_id": market_id, "reason": "exposure cap hit"})
+            continue
+        size = notional / price
+        position = create_late_resolution_capture_position(
+            settings,
+            ts=ts,
+            market_id=market_id,
+            asset=str(signal.get("asset") or market.get("asset") or ""),
+            side=str(signal.get("side") or "").upper(),
+            entry_price=price,
+            size=size,
+            signal=signal,
+        )
+        opened.append(position)
+        open_by_market[market_id] = position
+        open_by_market_notional[market_id] = open_by_market_notional.get(market_id, 0.0) + notional
+        total_open += notional
+
+    final_open = load_late_resolution_capture_open_positions(settings)
+    return {
+        "opened_positions_count": len(opened),
+        "closed_positions_count": len(closed),
+        "entry_blocks_count": len(entry_blocks),
+        "entry_blocks": entry_blocks,
+        "opened": opened,
+        "closed": closed,
+        "open_positions_count": len(final_open),
+        "open_capital_usdc": round(sum(float(item.get("notional_usdc") or 0.0) for item in final_open), 6),
     }
 
 
