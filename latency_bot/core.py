@@ -10,12 +10,15 @@ from bot.core import PolymarketCLI
 
 from .config import LatencyBotSettings
 from .execution.paper import (
+    run_btc_fair_value_paper_cycle,
     run_cex_latency_paper_cycle,
     run_complete_set_arb_paper_cycle,
     run_paper_execution_cycle,
     run_promoted_variant_paper_cycle,
     run_shadow_btc_no_paper_cycle,
     run_shadow_btc_yes_variant_paper_cycle,
+    run_temporal_inventory_maker_paper_cycle,
+    run_wallet_teacher_sniper_paper_cycle,
 )
 from .execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
 from .feeds.binance import refresh_binance_cache
@@ -23,6 +26,7 @@ from .feeds.discovery import discover_latency_markets
 from .feeds.kalshi import fetch_kalshi_arb_ticks
 from .feeds.polymarket import refresh_polymarket_cache
 from .feeds.polymarket_us import fetch_polymarket_us_arb_ticks
+from .feeds.wallet_activity import fetch_wallet_teacher_trades
 from .models import LatencyBotStatus
 from .risk.limits import risk_snapshot
 from .storage import (
@@ -50,10 +54,13 @@ from .storage import (
 from .strategy.complete_set_arb import build_complete_set_arb_signals
 from .strategy.fair_value import build_fair_values
 from .strategy.signals import (
+    build_btc_fair_value_paper_signals,
     build_cex_latency_paper_signals,
     build_shadow_btc_no_signals,
     build_shadow_btc_yes_variant_signals,
     build_signals,
+    build_temporal_inventory_maker_paper_signals,
+    build_wallet_teacher_sniper_signals,
 )
 
 
@@ -400,6 +407,27 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         fair_values=fair_values,
     )
     append_cex_latency_paper_signals(settings, cex_latency_paper_signals, ts=_now_iso())
+    btc_fair_value_paper_signals = build_btc_fair_value_paper_signals(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        fair_values=fair_values,
+    )
+    append_cex_latency_paper_signals(settings, btc_fair_value_paper_signals, ts=_now_iso())
+    temporal_inventory_maker_paper_signals = build_temporal_inventory_maker_paper_signals(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        fair_values=fair_values,
+    )
+    wallet_teacher_trades = fetch_wallet_teacher_trades(settings)
+    wallet_teacher_sniper_signals = build_wallet_teacher_sniper_signals(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        wallet_trades_payload=wallet_teacher_trades,
+    )
+    append_cex_latency_paper_signals(settings, wallet_teacher_sniper_signals, ts=_now_iso())
     execution = run_paper_execution_cycle(
         settings,
         markets_payload=markets_payload,
@@ -438,6 +466,27 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
         markets_payload=markets_payload,
         polymarket_cache=polymarket_cache,
         signals=cex_latency_paper_signals,
+        ts=_now_iso(),
+    )
+    btc_fair_value_paper_execution = run_btc_fair_value_paper_cycle(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        signals=btc_fair_value_paper_signals,
+        ts=_now_iso(),
+    )
+    temporal_inventory_maker_paper_execution = run_temporal_inventory_maker_paper_cycle(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        signals=temporal_inventory_maker_paper_signals,
+        ts=_now_iso(),
+    )
+    wallet_teacher_sniper_execution = run_wallet_teacher_sniper_paper_cycle(
+        settings,
+        markets_payload=markets_payload,
+        polymarket_cache=polymarket_cache,
+        signals=wallet_teacher_sniper_signals,
         ts=_now_iso(),
     )
     live_complete_set_arb_pilot = run_live_complete_set_arb_pilot_cycle(
@@ -499,6 +548,21 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "signals_seen": len(cex_latency_paper_signals),
             "execution": cex_latency_paper_execution,
         },
+        "btc_fair_value_paper": {
+            "signals_seen": len(btc_fair_value_paper_signals),
+            "execution": btc_fair_value_paper_execution,
+        },
+        "temporal_inventory_maker_paper": {
+            "signals_seen": len(temporal_inventory_maker_paper_signals),
+            "execution": temporal_inventory_maker_paper_execution,
+        },
+        "wallet_teacher_sniper": {
+            "signals_seen": len(wallet_teacher_sniper_signals),
+            "trade_fetch_errors": list(wallet_teacher_trades.get("errors", []))[:10]
+            if isinstance(wallet_teacher_trades.get("errors"), list)
+            else [],
+            "execution": wallet_teacher_sniper_execution,
+        },
         "live_complete_set_arb_pilot": {
             "signals_seen": len(complete_set_arb_signals),
             "execution": live_complete_set_arb_pilot,
@@ -516,6 +580,8 @@ def latency_bot_engine_cycle(settings: LatencyBotSettings) -> dict[str, Any]:
             "Configured promoted variants execute through live paper positions and feed realized revenue projections.",
             "Complete-set arb prototype scans paired YES/NO asks and paper-locks paired positions when net cost is below $1.",
             "CEX-latency directional paper bot runs separately with its own $1,000 paper bankroll.",
+            "Temporal inventory maker paper bot is paper-only and only counts locked pairs after both sides are actually owned.",
+            "Wallet-teacher sniper paper bot watches a public target wallet and paper-copies recent matching 5m market buys.",
             "Live complete-set arb pilot is tracked separately and defaults to dry-run/safety-blocked mode.",
         ],
     }
