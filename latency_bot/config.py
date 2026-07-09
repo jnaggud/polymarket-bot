@@ -269,6 +269,13 @@ class LatencyBotSettings:
     temporal_inventory_maker_paper_min_net_edge: float = 0.0200
     temporal_inventory_maker_paper_max_pair_cost: float = 0.9900
     temporal_inventory_maker_paper_quote_ttl_seconds: int = 12
+    temporal_inventory_maker_paper_high_edge_ttl_seconds: int = 30
+    temporal_inventory_maker_paper_hedge_ttl_seconds: int = 45
+    temporal_inventory_maker_paper_mid_aggressive_min_edge: float = 0.0400
+    temporal_inventory_maker_paper_near_touch_min_edge: float = 0.0800
+    temporal_inventory_maker_paper_min_fill_probability: float = 0.0300
+    temporal_inventory_maker_paper_min_expected_value_usdc: float = 0.0100
+    temporal_inventory_maker_paper_unpaired_timeout_seconds: int = 60
     temporal_inventory_maker_paper_force_exit_seconds: int = 20
     temporal_inventory_maker_paper_daily_loss_limit_usdc: float = 25.0
     live_temporal_inventory_maker_enabled: bool = False
@@ -295,6 +302,9 @@ class LatencyBotSettings:
     late_resolution_capture_paper_min_official_confidence: float = 0.97
     late_resolution_capture_paper_min_boundary_distance_bps: float = 8.0
     late_resolution_capture_paper_min_edge: float = 0.0100
+    late_resolution_capture_paper_min_depth_usdc: float = 50.0
+    late_resolution_capture_paper_min_exit_bid: float = 0.0500
+    late_resolution_capture_paper_max_book_age_ms: float = 5000.0
     late_resolution_capture_paper_daily_loss_limit_usdc: float = 25.0
     wallet_teacher_sniper_enabled: bool = True
     wallet_teacher_sniper_wallet: str = "0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82"
@@ -588,6 +598,13 @@ class LatencyBotSettings:
             temporal_inventory_maker_paper_min_net_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_NET_EDGE", 0.0200),
             temporal_inventory_maker_paper_max_pair_cost=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MAX_PAIR_COST", 0.9900),
             temporal_inventory_maker_paper_quote_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_QUOTE_TTL_SECONDS", 12),
+            temporal_inventory_maker_paper_high_edge_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_HIGH_EDGE_TTL_SECONDS", 30),
+            temporal_inventory_maker_paper_hedge_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_HEDGE_TTL_SECONDS", 45),
+            temporal_inventory_maker_paper_mid_aggressive_min_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MID_AGGRESSIVE_MIN_EDGE", 0.0400),
+            temporal_inventory_maker_paper_near_touch_min_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_NEAR_TOUCH_MIN_EDGE", 0.0800),
+            temporal_inventory_maker_paper_min_fill_probability=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_FILL_PROBABILITY", 0.0300),
+            temporal_inventory_maker_paper_min_expected_value_usdc=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_EXPECTED_VALUE_USDC", 0.0100),
+            temporal_inventory_maker_paper_unpaired_timeout_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_UNPAIRED_TIMEOUT_SECONDS", 60),
             temporal_inventory_maker_paper_force_exit_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_FORCE_EXIT_SECONDS", 20),
             temporal_inventory_maker_paper_daily_loss_limit_usdc=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_DAILY_LOSS_LIMIT_USDC", 25.0),
             live_temporal_inventory_maker_enabled=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
@@ -614,6 +631,9 @@ class LatencyBotSettings:
             late_resolution_capture_paper_min_official_confidence=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_OFFICIAL_CONFIDENCE", 0.97),
             late_resolution_capture_paper_min_boundary_distance_bps=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_BOUNDARY_DISTANCE_BPS", 8.0),
             late_resolution_capture_paper_min_edge=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_EDGE", 0.0100),
+            late_resolution_capture_paper_min_depth_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_DEPTH_USDC", 50.0),
+            late_resolution_capture_paper_min_exit_bid=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_EXIT_BID", 0.0500),
+            late_resolution_capture_paper_max_book_age_ms=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MAX_BOOK_AGE_MS", 5000.0),
             late_resolution_capture_paper_daily_loss_limit_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_DAILY_LOSS_LIMIT_USDC", 25.0),
             wallet_teacher_sniper_enabled=os.getenv("LATENCY_BOT_WALLET_TEACHER_SNIPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             wallet_teacher_sniper_wallet=os.getenv(
