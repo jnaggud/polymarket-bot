@@ -441,6 +441,45 @@ def _book_microprice(best_bid: float, best_ask: float, bid_depth: float, ask_dep
     return _clamp_probability(mid + imbalance * (spread / 2.0)), imbalance
 
 
+def _estimate_maker_fill_probability(
+    *,
+    best_bid: float,
+    best_ask: float,
+    quote_price: float,
+    edge: float,
+    seconds_left: float,
+    book_age_ms: float,
+    max_book_age_ms: float,
+) -> float:
+    if best_bid <= 0.0 or best_ask <= 0.0 or quote_price <= 0.0 or best_ask <= best_bid:
+        return 0.0
+    spread = max(best_ask - best_bid, 0.01)
+    distance_to_touch = max(best_ask - quote_price, 0.0)
+    proximity = 1.0 - min(max(distance_to_touch / spread, 0.0), 1.0)
+    time_multiplier = 1.10 if seconds_left <= 180.0 else 0.95 if seconds_left >= 900.0 else 1.0
+    staleness = min(max(book_age_ms / max(max_book_age_ms, 1.0), 0.0), 2.0)
+    staleness_multiplier = max(0.35, 1.0 - 0.35 * staleness)
+    edge_multiplier = 1.0 + min(max(edge, 0.0), 0.20)
+    probability = (0.015 + 0.70 * proximity) * time_multiplier * staleness_multiplier * edge_multiplier
+    return round(min(max(probability, 0.0), 0.85), 6)
+
+
+def _temporal_expected_value_usdc(
+    *,
+    edge: float,
+    quote_price: float,
+    quote_notional: float,
+    fill_probability: float,
+    spread: float,
+) -> float:
+    if edge <= 0.0 or quote_price <= 0.0 or quote_notional <= 0.0 or fill_probability <= 0.0:
+        return 0.0
+    shares = quote_notional / quote_price
+    expected_edge_value = edge * shares * fill_probability
+    adverse_penalty = min(max(spread, 0.0) * 0.10, 0.025) * shares * fill_probability
+    return round(expected_edge_value - adverse_penalty, 6)
+
+
 def build_btc_fair_value_paper_signals(
     settings: LatencyBotSettings,
     *,
@@ -624,27 +663,60 @@ def build_temporal_inventory_maker_paper_signals(
         fair_no = 1.0 - fair_yes
         uncertainty = 0.008 + 0.35 * spread + 0.010 * min(staleness, 1.5) + 0.25 * related_conflict
         adverse_buffer = max(0.004, spread * 0.25) + float(settings.taker_fee_per_share or 0.0)
+        seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
 
-        def maker_quote(best_bid_value: float, best_ask_value: float, side_fair: float) -> tuple[float, float]:
+        def maker_quote(best_bid_value: float, best_ask_value: float, side_fair: float) -> tuple[float, float, str, float, float]:
             if side_fair <= 0.0 or best_bid_value <= 0.0:
-                return 0.0, -1.0
+                return 0.0, -1.0, "INVALID", 0.0, 0.0
             tick = 0.01
             post_only_ceiling = best_ask_value - tick if best_ask_value > tick else best_bid_value
             fair_ceiling = side_fair - min_edge - adverse_buffer - uncertainty
-            quote_price = min(best_bid_value + tick, post_only_ceiling, fair_ceiling)
-            if quote_price <= 0.0:
-                return 0.0, -1.0
-            quote_price = round(max(quote_price, 0.01), 4)
-            net_edge = side_fair - quote_price - adverse_buffer - uncertainty
-            return quote_price, net_edge
+            if post_only_ceiling <= 0.0 or fair_ceiling <= 0.0:
+                return 0.0, -1.0, "INVALID", 0.0, 0.0
 
-        yes_quote, yes_edge = maker_quote(best_bid, best_ask, fair_yes)
-        no_quote, no_edge = maker_quote(no_bid, no_ask, fair_no)
+            def candidate(price: float, style: str) -> tuple[float, float, str, float, float]:
+                quote_price = round(max(min(price, post_only_ceiling, fair_ceiling), 0.0), 4)
+                if quote_price <= 0.0:
+                    return 0.0, -1.0, style, 0.0, 0.0
+                net_edge = side_fair - quote_price - adverse_buffer - uncertainty
+                fill_probability = _estimate_maker_fill_probability(
+                    best_bid=best_bid_value,
+                    best_ask=best_ask_value,
+                    quote_price=quote_price,
+                    edge=net_edge,
+                    seconds_left=seconds_left,
+                    book_age_ms=book_age_ms,
+                    max_book_age_ms=max_book_age_ms,
+                )
+                expected_value = _temporal_expected_value_usdc(
+                    edge=net_edge,
+                    quote_price=quote_price,
+                    quote_notional=quote_notional,
+                    fill_probability=fill_probability,
+                    spread=max(best_ask_value - best_bid_value, 0.0),
+                )
+                return quote_price, net_edge, style, fill_probability, expected_value
+
+            passive = candidate(best_bid_value + tick, "PASSIVE")
+            midpoint = candidate((best_bid_value + best_ask_value) / 2.0, "MID_AGGRESSIVE")
+            near_touch = candidate(post_only_ceiling, "NEAR_TOUCH")
+            if near_touch[1] >= float(settings.temporal_inventory_maker_paper_near_touch_min_edge):
+                return near_touch
+            if midpoint[1] >= float(settings.temporal_inventory_maker_paper_mid_aggressive_min_edge):
+                return midpoint
+            if passive[1] >= min_edge:
+                return passive
+            return max((passive, midpoint, near_touch), key=lambda item: item[1])
+
+        yes_quote, yes_edge, yes_style, yes_fill_probability, yes_expected_value = maker_quote(best_bid, best_ask, fair_yes)
+        no_quote, no_edge, no_style, no_fill_probability, no_expected_value = maker_quote(no_bid, no_ask, fair_no)
         side = "YES" if yes_edge >= no_edge else "NO"
         order_price = yes_quote if side == "YES" else no_quote
         edge = yes_edge if side == "YES" else no_edge
+        quote_style = yes_style if side == "YES" else no_style
+        fill_probability = yes_fill_probability if side == "YES" else no_fill_probability
+        expected_value_usdc = yes_expected_value if side == "YES" else no_expected_value
         side_fair = fair_yes if side == "YES" else fair_no
-        seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
         size = quote_notional / order_price if order_price > 0.0 and quote_notional > 0.0 else 0.0
         signal = {
             "market_id": market_id,
@@ -671,6 +743,9 @@ def build_temporal_inventory_maker_paper_signals(
             "order_price": order_price,
             "quote_size": size,
             "side_fair": side_fair,
+            "quote_style": quote_style,
+            "fill_probability": fill_probability,
+            "expected_value_usdc": expected_value_usdc,
             "adverse_selection_buffer": round(adverse_buffer, 6),
             "model_uncertainty": round(uncertainty, 6),
             "book_imbalance": round(imbalance, 6),
@@ -684,6 +759,10 @@ def build_temporal_inventory_maker_paper_signals(
             signal.update({"reason": "incomplete YES/NO book", "blocked_reason": "book"})
         elif order_price <= 0.0 or size <= 0.0:
             signal.update({"reason": "no valid post-only quote price", "blocked_reason": "quote_price", "edge": 0.0})
+        elif fill_probability < float(settings.temporal_inventory_maker_paper_min_fill_probability):
+            signal.update({"reason": "estimated maker fill probability below threshold", "blocked_reason": "fill_probability"})
+        elif expected_value_usdc < float(settings.temporal_inventory_maker_paper_min_expected_value_usdc):
+            signal.update({"reason": "expected maker quote value below threshold", "blocked_reason": "expected_value"})
         elif edge >= min_edge:
             signal.update(
                 {
@@ -739,6 +818,8 @@ def build_late_resolution_capture_paper_signals(
         no_ask = float(cache.get("no_best_ask") or max(1.0 - best_bid, 0.0))
         order_price = float(cache.get("ask_vwap") or best_ask) if side == "YES" else float(cache.get("no_ask_vwap") or no_ask)
         min_depth = float(cache.get("ask_fillable_usdc") or cache.get("asks_depth_usdc") or 0.0) if side == "YES" else float(cache.get("no_ask_fillable_usdc") or cache.get("no_asks_depth_usdc") or 0.0)
+        selected_bid = best_bid if side == "YES" else no_bid
+        book_age_ms = float(cache.get("book_age_ms") or 0.0)
         seconds_left = float(fair.get("time_to_expiry_sec") or 0.0)
         edge = official_confidence - order_price - float(settings.taker_slippage_per_share or 0.0) - float(settings.taker_fee_per_share or 0.0)
         signal = {
@@ -760,7 +841,7 @@ def build_late_resolution_capture_paper_signals(
             "boundary_distance_bps": boundary_distance_bps,
             "seconds_left": seconds_left,
             "min_depth_usdc": min_depth,
-            "book_age_ms": float(cache.get("book_age_ms") or 0.0),
+            "book_age_ms": book_age_ms,
             "eligible": False,
             "reason": "late-resolution edge below threshold",
             "blocked_reason": "edge",
@@ -769,10 +850,16 @@ def build_late_resolution_capture_paper_signals(
             signal.update({"reason": "too close to expiry for capture entry", "blocked_reason": "min_time", "edge": 0.0})
         elif seconds_left > settings.late_resolution_capture_paper_max_seconds_left:
             signal.update({"reason": "too far from expiry for late capture", "blocked_reason": "max_time", "edge": 0.0})
+        elif book_age_ms > float(settings.late_resolution_capture_paper_max_book_age_ms):
+            signal.update({"reason": "late-resolution book snapshot too stale", "blocked_reason": "book_age", "edge": 0.0})
         elif official_confidence < settings.late_resolution_capture_paper_min_official_confidence:
             signal.update({"reason": "official confidence below threshold", "blocked_reason": "official_confidence", "edge": 0.0})
         elif boundary_distance_bps < settings.late_resolution_capture_paper_min_boundary_distance_bps:
             signal.update({"reason": "boundary distance below threshold", "blocked_reason": "boundary_distance", "edge": 0.0})
+        elif min_depth < float(settings.late_resolution_capture_paper_min_depth_usdc):
+            signal.update({"reason": "late-resolution entry depth below threshold", "blocked_reason": "min_depth", "edge": 0.0})
+        elif selected_bid < float(settings.late_resolution_capture_paper_min_exit_bid):
+            signal.update({"reason": "late-resolution exit bid below threshold", "blocked_reason": "exit_bid", "edge": 0.0})
         elif order_price <= 0.0:
             signal.update({"reason": "missing entry price", "blocked_reason": "price", "edge": 0.0})
         elif edge >= settings.late_resolution_capture_paper_min_edge:

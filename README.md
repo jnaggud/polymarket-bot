@@ -111,6 +111,27 @@ Or use the helper scripts:
 
 If a background process exits immediately, the start script now prints the last log lines instead of leaving a misleading PID file behind.
 
+## Latency Bot Cockpit
+
+The paper-first latency engine is separate from the original scanner/trader loop. It tracks short-horizon crypto markets, runs the temporal inventory maker and late-resolution paper models, and keeps every live maker action behind dry-run, reconciliation, heartbeat, and PnL gates.
+
+Run the engine and cockpit directly:
+
+```bash
+python3 main.py daemon-latency-bot-engine --interval 10
+python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
+```
+
+Then open `http://127.0.0.1:8090`. The cockpit also exposes its compact refresh payload at `http://127.0.0.1:8090/api/state`.
+
+The temporal maker, guarded live-maker, and late-resolution settings are documented in `.env.example`. Live maker trading defaults to disabled and `dry_run`; do not add credentials or change the live confirmation gates in a committed file.
+
+Run the repository test suite with:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## `poly_data` Notes
 
 The public `poly_data` README documents `processed/trades.csv` fields like:

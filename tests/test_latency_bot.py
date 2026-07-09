@@ -11,7 +11,11 @@ from latency_bot.core import (
     latency_bot_init,
     latency_bot_summarize,
 )
-from latency_bot.dashboard import build_latency_bot_dashboard_state, render_latency_bot_dashboard_html
+from latency_bot.dashboard import (
+    _serialize_interactive_dashboard_payload,
+    build_latency_bot_dashboard_state,
+    render_latency_bot_dashboard_html,
+)
 from latency_bot.execution.live_complete_set_arb import run_live_complete_set_arb_pilot_cycle
 from latency_bot.execution.live_temporal_inventory_maker import run_live_temporal_inventory_maker_cycle
 from latency_bot.execution.paper import (
@@ -220,6 +224,51 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             shadow_variant_dashboard_family_limit=20,
             allow_maker_join=False,
             allow_maker_improve=False,
+            temporal_inventory_maker_paper_enabled=True,
+            temporal_inventory_maker_paper_capital_usdc=1000.0,
+            temporal_inventory_maker_paper_max_market_exposure_usdc=150.0,
+            temporal_inventory_maker_paper_max_total_exposure_usdc=500.0,
+            temporal_inventory_maker_paper_base_order_usdc=25.0,
+            temporal_inventory_maker_paper_min_net_edge=0.0200,
+            temporal_inventory_maker_paper_max_pair_cost=0.9900,
+            temporal_inventory_maker_paper_quote_ttl_seconds=12,
+            temporal_inventory_maker_paper_high_edge_ttl_seconds=30,
+            temporal_inventory_maker_paper_hedge_ttl_seconds=45,
+            temporal_inventory_maker_paper_mid_aggressive_min_edge=0.0400,
+            temporal_inventory_maker_paper_near_touch_min_edge=0.0800,
+            temporal_inventory_maker_paper_min_fill_probability=0.0300,
+            temporal_inventory_maker_paper_min_expected_value_usdc=0.0100,
+            temporal_inventory_maker_paper_unpaired_timeout_seconds=60,
+            temporal_inventory_maker_paper_force_exit_seconds=20,
+            temporal_inventory_maker_paper_daily_loss_limit_usdc=25.0,
+            live_temporal_inventory_maker_enabled=False,
+            live_temporal_inventory_maker_mode="dry_run",
+            live_temporal_inventory_maker_confirm="",
+            live_temporal_inventory_maker_capital_usdc=50.0,
+            live_temporal_inventory_maker_base_order_usdc=5.0,
+            live_temporal_inventory_maker_max_open_orders=1,
+            live_temporal_inventory_maker_max_orders_per_cycle=1,
+            live_temporal_inventory_maker_min_edge=0.0300,
+            live_temporal_inventory_maker_min_seconds_left=90,
+            live_temporal_inventory_maker_max_order_age_seconds=20,
+            live_temporal_inventory_maker_heartbeat_timeout_seconds=30,
+            live_temporal_inventory_maker_daily_loss_limit_usdc=5.0,
+            live_temporal_inventory_maker_require_positive_paper_pnl=True,
+            live_temporal_inventory_maker_require_reconciliation=True,
+            late_resolution_capture_paper_enabled=True,
+            late_resolution_capture_paper_capital_usdc=1000.0,
+            late_resolution_capture_paper_notional_usdc=25.0,
+            late_resolution_capture_paper_max_market_exposure_usdc=50.0,
+            late_resolution_capture_paper_max_total_exposure_usdc=150.0,
+            late_resolution_capture_paper_min_seconds_left=3,
+            late_resolution_capture_paper_max_seconds_left=45,
+            late_resolution_capture_paper_min_official_confidence=0.97,
+            late_resolution_capture_paper_min_boundary_distance_bps=8.0,
+            late_resolution_capture_paper_min_edge=0.0100,
+            late_resolution_capture_paper_min_depth_usdc=50.0,
+            late_resolution_capture_paper_min_exit_bid=0.0500,
+            late_resolution_capture_paper_max_book_age_ms=5000.0,
+            late_resolution_capture_paper_daily_loss_limit_usdc=25.0,
             binance_rest_endpoint="https://api.binance.com/api/v3/ticker/bookTicker",
             binance_sample_history=120,
             polymarket_cli_timeout_seconds=12,
@@ -367,6 +416,14 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             self.assertIn("Complete-Set Arb Prototype", html)
             self.assertIn("Consensus Meta-Strategy", html)
             self.assertIn("Confidence Sizing Ladder", html)
+            self.assertIn("POLYMARKET LATENCY OPS", html)
+            self.assertIn("/api/state", html)
+            self.assertIn("window.__LATENCY_DASHBOARD_INITIAL__", html)
+
+            payload = json.loads(_serialize_interactive_dashboard_payload(state))
+            self.assertEqual(payload["status"]["runner_status"], state["status"]["runner_status"])
+            self.assertIn("summary", payload["temporal"])
+            self.assertIn("items", payload["markets"])
 
     def test_shadow_btc_no_signals_can_be_eligible(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -867,13 +924,15 @@ class LatencyBotScaffoldTest(unittest.TestCase):
                 ],
             )
             self.assertTrue(signals[0]["eligible"])
-            run_temporal_inventory_maker_paper_cycle(
+            quote_result = run_temporal_inventory_maker_paper_cycle(
                 settings,
                 markets_payload=markets_payload,
                 polymarket_cache=cache,
                 signals=signals,
                 ts="2099-05-07T15:00:00Z",
             )
+            self.assertEqual(quote_result["open_markets_count"], 0)
+            self.assertEqual(quote_result["open_quotes_count"], 1)
             result = run_temporal_inventory_maker_paper_cycle(
                 settings,
                 markets_payload=markets_payload,
@@ -884,6 +943,65 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             self.assertEqual(result["cancelled_quotes_count"], 1)
             stats = latency_bot_temporal_inventory_maker_paper_stats(settings)
             self.assertGreaterEqual(stats["summary"]["quote_cancelled"], 1)
+            self.assertEqual(stats["summary"]["open_markets"], 0)
+            self.assertEqual(stats["summary"]["active_inventory_markets"], 0)
+            self.assertEqual(stats["summary"]["tracked_markets"], 1)
+
+    def test_temporal_inventory_maker_uses_aggressive_quote_style_when_edge_is_strong(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                temporal_inventory_maker_paper_enabled=True,
+                temporal_inventory_maker_paper_min_net_edge=0.01,
+                temporal_inventory_maker_paper_mid_aggressive_min_edge=0.02,
+                temporal_inventory_maker_paper_near_touch_min_edge=0.05,
+                temporal_inventory_maker_paper_min_fill_probability=0.01,
+                temporal_inventory_maker_paper_min_expected_value_usdc=0.0,
+                taker_fee_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-aggressive",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": "2099-05-07T15:20:00Z",
+                    }
+                ]
+            }
+            cache = {
+                "items": [
+                    {
+                        "market_id": "btc-temporal-aggressive",
+                        "asset": "btc",
+                        "best_bid": 0.40,
+                        "best_ask": 0.50,
+                        "no_best_bid": 0.49,
+                        "no_best_ask": 0.60,
+                        "bids_depth_usdc": 1000.0,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            signals = build_temporal_inventory_maker_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                fair_values=[
+                    {
+                        "market_id": "btc-temporal-aggressive",
+                        "asset": "btc",
+                        "fair_yes": 0.90,
+                        "fair_no": 0.10,
+                        "time_to_expiry_sec": 300.0,
+                    }
+                ],
+            )
+            self.assertTrue(signals[0]["eligible"])
+            self.assertIn(signals[0]["quote_style"], {"MID_AGGRESSIVE", "NEAR_TOUCH"})
+            self.assertGreater(float(signals[0]["order_price"]), 0.41)
 
     def test_live_temporal_inventory_maker_dry_run_records_candidate(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1077,6 +1195,65 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             html = render_latency_bot_dashboard_html(state)
             self.assertIn("Late Resolution Capture Paper", html)
             self.assertIn("Live Temporal Inventory Maker", html)
+
+    def test_late_resolution_capture_requires_exit_bid(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = replace(
+                self.make_settings(tmpdir),
+                late_resolution_capture_paper_enabled=True,
+                late_resolution_capture_paper_min_seconds_left=1,
+                late_resolution_capture_paper_max_seconds_left=45,
+                late_resolution_capture_paper_min_official_confidence=0.97,
+                late_resolution_capture_paper_min_boundary_distance_bps=1.0,
+                late_resolution_capture_paper_min_edge=0.01,
+                late_resolution_capture_paper_min_depth_usdc=10.0,
+                late_resolution_capture_paper_min_exit_bid=0.05,
+                taker_fee_per_share=0.0,
+                taker_slippage_per_share=0.0,
+            )
+            latency_bot_init(settings)
+            markets_payload = {
+                "items": [
+                    {
+                        "market_id": "btc-late-no-bid",
+                        "asset": "btc",
+                        "tenor_minutes": 5,
+                        "expiry_ts": (datetime.now(timezone.utc) + timedelta(seconds=20)).isoformat().replace("+00:00", "Z"),
+                    }
+                ]
+            }
+            cache = {
+                "items": [
+                    {
+                        "market_id": "btc-late-no-bid",
+                        "asset": "btc",
+                        "best_bid": 0.0,
+                        "best_ask": 0.90,
+                        "no_best_bid": 0.09,
+                        "no_best_ask": 0.11,
+                        "asks_depth_usdc": 1000.0,
+                        "book_age_ms": 100.0,
+                    }
+                ]
+            }
+            signals = build_late_resolution_capture_paper_signals(
+                settings,
+                markets_payload=markets_payload,
+                polymarket_cache=cache,
+                fair_values=[
+                    {
+                        "market_id": "btc-late-no-bid",
+                        "asset": "btc",
+                        "fair_yes": 0.997,
+                        "fair_no": 0.003,
+                        "reference_price": 100.0,
+                        "current_price": 101.0,
+                        "time_to_expiry_sec": 20.0,
+                    }
+                ],
+            )
+            self.assertFalse(signals[0]["eligible"])
+            self.assertEqual(signals[0]["blocked_reason"], "exit_bid")
 
     def test_cex_latency_quant_poc_filters_weak_signals(self) -> None:
         with TemporaryDirectory() as tmpdir:
