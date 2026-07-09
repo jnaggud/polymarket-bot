@@ -2550,6 +2550,9 @@ def _bootstrap_intraday_registry_from_local_cache(settings: Settings) -> dict[st
 
 
 def _resolve_intraday_market_tokens(market: dict[str, Any]) -> dict[str, Any] | None:
+    if _extract_market_token_ids(market):
+        return dict(market)
+
     market_id = _extract_market_id(market)
     slug = _extract_slug(market)
     cache_keys = [key for key in (f"id:{market_id}" if market_id else "", f"slug:{slug}" if slug else "") if key]
