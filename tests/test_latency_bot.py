@@ -711,8 +711,9 @@ class LatencyBotScaffoldTest(unittest.TestCase):
 
             state = build_latency_bot_dashboard_state(settings, fast=True)
             html = render_latency_bot_dashboard_html(state)
-            self.assertIn("CEX Latency Paper Bot", html)
-            self.assertIn("Research-only unless recent realized PnL", html)
+            self.assertNotIn("CEX Latency Paper Bot", html)
+            self.assertIn("Strategy Truth", html)
+            self.assertIn("Open archived research and legacy bots", html)
 
     def test_temporal_inventory_maker_quotes_seed_and_lock_owned_pair(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -876,7 +877,8 @@ class LatencyBotScaffoldTest(unittest.TestCase):
 
             state = build_latency_bot_dashboard_state(settings, fast=True)
             html = render_latency_bot_dashboard_html(state)
-            self.assertIn("Temporal Inventory Maker Paper Bot", html)
+            self.assertNotIn("Temporal Inventory Maker Paper Bot", html)
+            self.assertIn("Promoted 5m Basket", html)
             self.assertIn("MAKER_FILL", html)
 
     def test_temporal_inventory_maker_cancels_stale_quote(self) -> None:
@@ -1039,12 +1041,15 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             rows = {row["strategy_id"]: row for row in build_strategy_truth_rows(settings)}
             legacy = rows["promoted:legacy_family"]
             realistic = rows[f"promoted:{variant_id}:v1"]
+            basket = rows["promoted:directional_basket:v1"]
             self.assertEqual(legacy["execution_tier"], "optimistic_simulation")
             self.assertEqual(legacy["model_pnl_usdc"], 20.0)
             self.assertIsNone(legacy["executable_paper_pnl_usdc"])
             self.assertEqual(realistic["execution_tier"], "executable_paper")
             self.assertEqual(realistic["executable_paper_pnl_usdc"], 5.0)
             self.assertIsNone(realistic["model_pnl_usdc"])
+            self.assertEqual(basket["executable_paper_pnl_usdc"], 5.0)
+            self.assertEqual(realistic["parent_strategy_id"], basket["strategy_id"])
 
     def test_related_market_constraint_graph_requires_explicit_logic(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1258,8 +1263,15 @@ class LatencyBotScaffoldTest(unittest.TestCase):
 
             state = build_latency_bot_dashboard_state(settings, fast=True)
             html = render_latency_bot_dashboard_html(state)
-            self.assertIn("Late Resolution Capture Paper", html)
-            self.assertIn("Live Temporal Inventory Maker", html)
+            self.assertNotIn("Late Resolution Capture Paper", html)
+            self.assertIn("Open archived research and legacy bots", html)
+            self.assertIn("Live Maker", html)
+
+            payload = json.loads(_serialize_interactive_dashboard_payload(state))
+            late_row = next(
+                row for row in payload["strategy_truth"] if row["strategy_id"] == "late_resolution_capture"
+            )
+            self.assertEqual(late_row["timeframes"]["all"]["closed"], 1)
 
     def test_late_resolution_capture_requires_exit_bid(self) -> None:
         with TemporaryDirectory() as tmpdir:

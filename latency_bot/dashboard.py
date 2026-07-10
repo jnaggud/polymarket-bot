@@ -685,6 +685,8 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
     .data-card { border: 1px solid #dfe7f0; border-radius: 8px; padding: 9px; background: #fff; min-width: 0; }
     .data-card .label { color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
     .data-card .value { font-size: 20px; font-weight: 900; font-variant-numeric: tabular-nums; margin-top: 3px; overflow-wrap: anywhere; }
+    details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    details summary { cursor: pointer; color: var(--ink); }
     @media (max-width: 1100px) {
       .ops-topbar, .ops-hero, .ops-body { grid-template-columns: 1fr; }
       .ops-main { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -700,7 +702,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         <div class="ops-brand">
           <span class="ops-mark">Q</span>
           <span class="ops-title">POLYMARKET LATENCY OPS</span>
-          <span class="ops-subtitle">TEMPORAL MAKER / LIVE GATES / LATE CAPTURE / RESEARCH</span>
+          <span class="ops-subtitle">PROMOTED 5M BASKET / TEMPORAL MAKER / LIVE GATES</span>
         </div>
         <div class="ops-clock" id="ops-clock">--:--:--</div>
       </div>
@@ -732,7 +734,6 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         <button class="ops-tab" type="button" data-tab="truth">Strategy Truth</button>
         <button class="ops-tab" type="button" data-tab="temporal">Temporal</button>
         <button class="ops-tab" type="button" data-tab="live">Live Maker</button>
-        <button class="ops-tab" type="button" data-tab="late">Late Capture</button>
         <button class="ops-tab" type="button" data-tab="markets">Markets</button>
         <div class="ops-controls">
           <label><input type="checkbox" id="ops-freeze"> freeze</label>
@@ -758,9 +759,15 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
                 <button class="ops-tab" type="button" data-truth-period="7d">7d</button>
                 <button class="ops-tab" type="button" data-truth-period="24h">24h</button>
               </div>
+              <div class="ops-tabs" id="truth-views">
+                <button class="ops-tab" type="button" data-truth-view="active" aria-selected="true">Active</button>
+                <button class="ops-tab" type="button" data-truth-view="archive">Archive</button>
+                <button class="ops-tab" type="button" data-truth-view="all">All</button>
+              </div>
               <div class="ops-panel-content" id="strategy-truth-table"></div>
+              <div class="ops-panel-content" id="promoted-basket-detail"></div>
             </div>
-            <div class="ops-panel full"><h3>Related-Market Constraint Graph</h3><div class="ops-panel-content" id="constraint-graph-table"></div></div>
+            <div class="ops-panel full" id="constraint-graph-panel"><h3>Related-Market Constraint Graph</h3><div class="ops-panel-content" id="constraint-graph-table"></div></div>
           </div>
           <div class="tab-pane" data-pane="temporal">
             <div class="data-cards" id="temporal-cards"></div>
@@ -772,13 +779,6 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
           <div class="tab-pane" data-pane="live">
             <div class="data-cards" id="live-cards"></div>
             <div class="ops-panel"><h3>Recent Live Maker Decisions</h3><div class="ops-panel-content" id="live-orders"></div></div>
-          </div>
-          <div class="tab-pane" data-pane="late">
-            <div class="data-cards" id="late-cards"></div>
-            <div class="cockpit-grid">
-              <div class="ops-panel full"><h3>Recent Late Signals</h3><div class="ops-panel-content" id="late-signals"></div></div>
-              <div class="ops-panel full"><h3>Skip Reasons</h3><div class="ops-panel-content" id="late-reasons"></div></div>
-            </div>
           </div>
           <div class="tab-pane" data-pane="markets">
             <div class="data-cards" id="market-cards"></div>
@@ -798,6 +798,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       let state = initial;
       let activeTab = "command";
       let truthTimeframe = "all";
+      let truthView = "active";
       const qs = new URLSearchParams(window.location.search);
       const mode = qs.get("mode") || (initial.fast_mode ? "fast" : "full");
       const $ = (id) => document.getElementById(id);
@@ -842,6 +843,9 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         if (normalized.includes("settle") || normalized.includes("close")) return 5;
         return 1;
       }
+      function promotedBasket(data) {
+        return (data.strategy_truth || []).find((item) => item.strategy_id === "promoted:directional_basket:v1") || {};
+      }
       function renderSparkline(points, bankroll) {
         const svg = $("temporal-spark");
         if (!svg) return;
@@ -876,14 +880,15 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       function renderTape(data) {
         const temporal = data.temporal?.summary || {};
         const live = data.live_temporal?.summary || {};
-        const late = data.late_resolution?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
         const counts = data.counts || {};
         const assets = assetAggregates(data.markets?.items || []).slice(0, 3);
         const items = [
           ["LIVE", `${data.status?.runner_status || "unknown"} / ${data.status?.phase || "-"}`],
+          ["BASKET PNL", money(basketStats.net_pnl_usdc || 0), n(basketStats.net_pnl_usdc || 0)],
           ["TEMP PNL", money(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0), n(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0)],
           ["LIVE MAKER", `${live.pilot_mode || "dry_run"} / ${num(live.dry_run_24h || 0)} dry`, 0],
-          ["LATE PNL", money(late.net_pnl || 0), n(late.net_pnl || 0)],
           ["BOOKS 60M", num(counts.polymarket_books || 0), 0],
           [assets[0]?.asset || "MARKETS", `${num(data.markets?.count || 0)} tracked`, 0],
         ];
@@ -892,20 +897,21 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       function renderHero(data) {
         const temporal = data.temporal?.summary || {};
         const live = data.live_temporal?.summary || {};
-        const late = data.late_resolution?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
         const truthRows = (data.strategy_truth || []).filter((item) => item.data_status === "loaded" && item.execution_tier === "executable_paper" && Boolean(item.enabled));
-        const leader = truthRows.sort((a, b) => n(b.timeframes?.all?.net_pnl_usdc) - n(a.timeframes?.all?.net_pnl_usdc))[0] || {};
+        const leader = basket.enabled ? basket : (truthRows.sort((a, b) => n(b.timeframes?.all?.net_pnl_usdc) - n(a.timeframes?.all?.net_pnl_usdc))[0] || {});
         const leaderStats = leader.timeframes?.all || {};
         setText("ops-clock", new Date().toLocaleTimeString([], { hour12: false }));
         setText("hero-equity", money(leaderStats.net_pnl_usdc || 0));
         setHTML("hero-realized", `<span class="${posClass(leaderStats.net_pnl_usdc)}">${money(leaderStats.net_pnl_usdc || 0)}</span>`);
         setText("hero-marked", num(leaderStats.closed || 0));
-        setText("hero-fillrate", leader.validation?.status || "blocked");
+        setText("hero-fillrate", leader.data_status === "no_observations" ? "collecting" : (leader.validation?.status || "blocked"));
         setText("hero-subtitle", `${leader.label || "No validated strategy"} / ${leader.execution_tier || "no data"}`);
         const temporalBadge = $("temporal-state-badge");
         if (temporalBadge) {
-          temporalBadge.className = badgeClass(Boolean(leader.validation?.passed), Boolean(leaderStats.closed));
-          temporalBadge.textContent = leader.validation?.passed ? "PASSED" : "PAPER";
+          temporalBadge.className = badgeClass(Boolean(leader.validation?.passed), Boolean(leader.enabled));
+          temporalBadge.textContent = leader.validation?.passed ? "PASSED" : (leader.data_status === "no_observations" ? "COLLECTING" : "PAPER");
         }
         const liveBadge = $("live-gate-badge");
         if (liveBadge) {
@@ -915,11 +921,10 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         }
         renderSparkline([], leaderStats.net_pnl_usdc || 0);
         setHTML("strategy-stack", [
+          ["Promoted 5m Basket", basket.data_status === "no_observations" ? "collecting" : "paper", `${num(basket.member_count || 0)} ETH/BTC variants / ${num(basketStats.closed || 0)} closes / ${money(basketStats.net_pnl_usdc || 0)}`, Boolean(basket.enabled)],
           ["Temporal Maker", temporal.enabled ? "enabled" : "disabled", `${money(temporal.realized_pnl_usdc || 0)} realized / ${pct(temporal.quote_fill_rate || 0)} fills`, temporal.enabled],
           ["Live Maker", live.pilot_mode || "dry_run", `${num(live.dry_run_24h || 0)} dry-run / ${num(live.submitted_24h || 0)} submitted`, Boolean(live.armed_for_live_orders)],
-          ["Late Capture", late.enabled ? "enabled" : "disabled", `${num(late.eligible_60m || 0)} eligible 60m / ${money(late.net_pnl || 0)} net`, late.enabled],
-          ["Research CEX", data.research?.cex_latency?.enabled ? "enabled" : "research", `${money(data.research?.cex_latency?.net_pnl || 0)} net`, Boolean(data.research?.cex_latency?.enabled)],
-        ].map(([name, tag, meta, good]) => `<div class="strategy-row"><div><div class="strategy-name">${esc(name)}</div><div class="strategy-meta">${esc(meta)}</div></div><span class="${badgeClass(good, tag === "dry_run" || tag === "research")}">${esc(tag)}</span></div>`).join(""));
+        ].map(([name, tag, meta, good]) => `<div class="strategy-row"><div><div class="strategy-name">${esc(name)}</div><div class="strategy-meta">${esc(meta)}</div></div><span class="${badgeClass(good, tag === "dry_run" || tag === "collecting")}">${esc(tag)}</span></div>`).join(""));
         const graphBadge = $("graph-health");
         if (graphBadge) {
           const stale = Boolean(data.status?.last_error);
@@ -928,30 +933,40 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         }
       }
       function renderTruth(data) {
-        const rows = data.strategy_truth || [];
+        const allRows = data.strategy_truth || [];
+        const rows = allRows.filter((item) => {
+          if (truthView === "active") return Boolean(item.enabled) && item.execution_tier === "executable_paper" && !item.parent_strategy_id;
+          if (truthView === "archive") return !item.enabled || item.execution_tier !== "executable_paper";
+          return true;
+        });
         setHTML("strategy-truth-table", table(
-          ["Strategy", "Tier", "Enabled", "Status", "Closed", "Win", "Selected PnL", "Model", "Executable Paper", "Actual Rebates", "Wallet", "Max DD", "95% EV", "Gate"],
+          ["Strategy", "Tier", "Status", "Closed", "Win", "PnL", "Max DD", "95% EV", "Gate"],
           rows.map((item) => {
             const stats = item.timeframes?.[truthTimeframe] || {};
             return [
               esc(item.label || item.strategy_id || ""),
               esc(item.execution_tier || ""),
-              esc(Boolean(item.enabled)),
               esc(item.data_status === "not_loaded_fast" ? "not loaded in fast mode" : item.data_status || ""),
               num(stats.closed || 0),
               pct(stats.win_rate || 0),
               `<span class="${posClass(stats.net_pnl_usdc)}">${money(stats.net_pnl_usdc || 0)}</span>`,
-              maybeMoney(item.model_pnl_usdc),
-              maybeMoney(item.executable_paper_pnl_usdc),
-              maybeMoney(item.rebate_pnl_usdc),
-              item.wallet_reconciled ? maybeMoney(item.wallet_pnl_usdc) : "not reconciled",
               money(stats.max_drawdown_usdc || 0),
               money(stats.lower_95_trade_ev_usdc || 0),
               `<span class="${badgeClass(Boolean(item.validation?.passed), false)}" title="${esc((item.validation?.reasons || []).join('; '))}">${esc(item.validation?.status || "blocked")}</span>`,
             ];
           })
         ));
+        const basketChildren = allRows.filter((item) => item.parent_strategy_id === "promoted:directional_basket:v1");
+        setHTML("promoted-basket-detail", truthView === "archive" ? "" : `<details><summary><strong>Promoted basket variants (${num(basketChildren.length)})</strong> — fresh execution-realistic results</summary>${table(
+          ["Variant", "Status", "Closed", "Win", "PnL", "Gate"],
+          basketChildren.map((item) => {
+            const stats = item.timeframes?.[truthTimeframe] || {};
+            return [esc(item.label || ""), esc(item.data_status || ""), num(stats.closed || 0), pct(stats.win_rate || 0), `<span class="${posClass(stats.net_pnl_usdc)}">${money(stats.net_pnl_usdc || 0)}</span>`, esc(item.validation?.status || "blocked")];
+          })
+        )}</details>`);
         const graph = data.related_market_graph || {};
+        const graphPanel = $("constraint-graph-panel");
+        if (graphPanel) graphPanel.style.display = truthView === "active" ? "none" : "block";
         setHTML("constraint-graph-table", table(
           ["Group", "Legs", "Cost", "Edge", "Capacity", "Execution"],
           (graph.opportunities || []).map((item) => [
@@ -972,14 +987,16 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       function renderCommand(data) {
         const temporal = data.temporal?.summary || {};
         const live = data.live_temporal?.summary || {};
-        const late = data.late_resolution?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
         setHTML("command-cards", cards([
+          { label: "Promoted Basket", value: basket.data_status === "no_observations" ? "collecting" : money(basketStats.net_pnl_usdc || 0) },
+          { label: "Basket Variants", value: num(basket.member_count || 0) },
+          { label: "Basket Closes", value: num(basketStats.closed || 0) },
           { label: "Tracked", value: num(data.status?.tracked_markets_count || 0) },
           { label: "Temporal Active", value: num(temporal.active_inventory_markets || 0) },
           { label: "Open Quotes", value: num(temporal.quote_open || 0) },
-          { label: "Dry-Run Orders", value: num(live.dry_run_24h || 0) },
           { label: "Live Submitted", value: num(live.submitted_24h || 0) },
-          { label: "Late Eligible", value: num(late.eligible_60m || 0) },
           { label: "Capital Used", value: money(data.capital?.total_current_capital_usdc || 0) },
           { label: "Last Cycle", value: esc(data.generated_at_ct || "-") },
         ]));
@@ -1063,34 +1080,6 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
           esc(item.decision || ""),
           px(item.edge || 0),
           esc(item.reason || item.error || ""),
-        ])));
-      }
-      function renderLate(data) {
-        const late = data.late_resolution?.summary || {};
-        setHTML("late-cards", cards([
-          { label: "Net PnL", value: money(late.net_pnl || 0), className: posClass(late.net_pnl) },
-          { label: "Open", value: num(late.open || 0) },
-          { label: "Closed", value: num(late.closed || 0) },
-          { label: "Eligible 60m", value: num(late.eligible_60m || 0) },
-          { label: "Best Edge", value: px(late.best_edge_60m || 0) },
-          { label: "Min Depth", value: money(late.min_depth_usdc || 0) },
-          { label: "Min Exit Bid", value: px(late.min_exit_bid || 0) },
-          { label: "Max Book Age", value: `${num(late.max_book_age_ms || 0)}ms` },
-        ]));
-        setHTML("late-signals", table(["Time", "Market", "Side", "Eligible", "Edge", "Px", "Conf", "Reason"], (data.late_resolution?.recent_signals || []).map((item) => [
-          esc(shortTs(item.ts)),
-          esc(item.market_id || ""),
-          esc(item.side || ""),
-          esc(Boolean(item.eligible)),
-          px(item.edge || 0),
-          px(item.order_price || 0),
-          n(item.official_confidence || 0).toFixed(3),
-          esc(item.reason || ""),
-        ])));
-        setHTML("late-reasons", table(["Reason", "Count", "Max Edge"], (data.late_resolution?.reason_breakdown || []).map((item) => [
-          esc(item.reason || ""),
-          num(item.count || 0),
-          px(item.max_edge || 0),
         ])));
       }
       function renderMarkets(data) {
@@ -1298,7 +1287,6 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         renderTruth(state);
         renderTemporal(state);
         renderLive(state);
-        renderLate(state);
         renderMarkets(state);
         renderActivity(state);
         drawAgentGraph(state);
@@ -1317,10 +1305,10 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         }
       }
       document.querySelectorAll(".ops-tab").forEach((button) => {
-        if (button.dataset.truthPeriod) return;
+        if (button.dataset.truthPeriod || button.dataset.truthView) return;
         button.addEventListener("click", () => {
           activeTab = button.dataset.tab || "command";
-          document.querySelectorAll(".ops-tab").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button)));
+          document.querySelectorAll("[data-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button)));
           document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === activeTab));
           drawAgentGraph(state);
           drawScatter(state.temporal?.recent_quotes || []);
@@ -1330,6 +1318,13 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         button.addEventListener("click", () => {
           truthTimeframe = button.dataset.truthPeriod || "all";
           document.querySelectorAll("[data-truth-period]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderTruth(state);
+        });
+      });
+      document.querySelectorAll("[data-truth-view]").forEach((button) => {
+        button.addEventListener("click", () => {
+          truthView = button.dataset.truthView || "active";
+          document.querySelectorAll("[data-truth-view]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
           renderTruth(state);
         });
       });
@@ -1840,7 +1835,36 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     return state
 
 
+def _render_latency_bot_fast_html(state: dict[str, Any]) -> str:
+    status = state.get("status", {}) if isinstance(state.get("status"), dict) else {}
+    page_generated_at = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S CT")
+    last_cycle_completed = _fmt_ts(status.get("last_cycle_completed_at"))
+    cockpit = _render_interactive_cockpit(state)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polymarket Latency Ops</title>
+  <style>
+    body {{ margin: 0; background: #eef3f8; color: #0f172a; font-family: ui-sans-serif, system-ui, sans-serif; }}
+    .fast-header {{ max-width: 1440px; margin: 16px auto 0; padding: 0 16px; display: flex; gap: 12px; justify-content: space-between; align-items: center; color: #64748b; font-size: 12px; }}
+    .fast-header a {{ color: #0f766e; font-weight: 800; text-decoration: none; }}
+  </style>
+</head>
+<body>
+  <div class="fast-header">
+    <span>Updated {html.escape(page_generated_at)} · last cycle {html.escape(last_cycle_completed)}</span>
+    <a href="?mode=full">Open archived research and legacy bots</a>
+  </div>
+  {cockpit}
+</body>
+</html>"""
+
+
 def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
+    if bool(state.get("fast_mode")):
+        return _render_latency_bot_fast_html(state)
     page_generated_at = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S CT")
     fast_mode = bool(state.get("fast_mode"))
     served_from_cache = bool(state.get("served_from_cache"))

@@ -128,6 +128,31 @@ def _event_rows(
         )
         open_count = int(conn.execute("SELECT COUNT(*) FROM positions WHERE status = 'open' AND mode LIKE 'promoted_variant:%' AND COALESCE(execution_model, 'legacy') = 'legacy'").fetchone()[0])
         return rows, open_count
+    if kind == "position_promoted_v1":
+        modes = [item for item in mode.split(",") if item]
+        if not modes:
+            return [], 0
+        placeholders = ", ".join("?" for _ in modes)
+        rows = _query_rows(
+            conn,
+            f"""
+            SELECT e.ts, e.pnl, p.market_id
+            FROM position_events e
+            JOIN positions p ON p.position_id = e.position_id
+            WHERE e.event_type = 'close'
+              AND p.mode IN ({placeholders})
+              AND COALESCE(p.execution_model, 'legacy') = 'vwap_latency_partial_fill_v1'
+            ORDER BY e.ts, e.id
+            """,
+            tuple(modes),
+        )
+        open_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM positions WHERE status = 'open' AND mode IN ({placeholders}) AND COALESCE(execution_model, 'legacy') = 'vwap_latency_partial_fill_v1'",
+                tuple(modes),
+            ).fetchone()[0]
+        )
+        return rows, open_count
     if kind == "cex":
         rows = _query_rows(
             conn,
@@ -219,6 +244,20 @@ def build_strategy_truth_rows(settings: LatencyBotSettings) -> list[dict[str, An
             "assumptions": "historical top-of-book paper fills; preserved but never promotion eligible",
         }
     )
+    definitions.append(
+        {
+            "strategy_id": "promoted:directional_basket:v1",
+            "label": "Promoted ETH/BTC 5m directional basket",
+            "kind": "position_promoted_v1",
+            "mode": ",".join(f"promoted_variant:{variant_id}" for variant_id in settings.promoted_variant_ids),
+            "execution_model": "vwap_latency_partial_fill_v1",
+            "execution_tier": "executable_paper",
+            "enabled": bool(settings.promoted_variant_ids),
+            "member_count": len(settings.promoted_variant_ids),
+            "bankroll": settings.bankroll_usdc,
+            "assumptions": "Aggregate of the promoted variants using VWAP book walk, latency/slippage/fees, and partial-fill haircuts",
+        }
+    )
     for variant_id in settings.promoted_variant_ids:
         definitions.append(
             {
@@ -229,6 +268,7 @@ def build_strategy_truth_rows(settings: LatencyBotSettings) -> list[dict[str, An
                 "execution_model": "vwap_latency_partial_fill_v1",
                 "execution_tier": "executable_paper",
                 "enabled": True,
+                "parent_strategy_id": "promoted:directional_basket:v1",
                 "bankroll": settings.bankroll_usdc,
                 "assumptions": "VWAP book walk, latency/slippage/fees, partial-fill haircut",
             }
