@@ -11,8 +11,10 @@ from ..storage import (
     load_live_temporal_inventory_maker_open_orders,
     record_live_temporal_inventory_maker_heartbeat,
     record_live_temporal_inventory_maker_order,
+    record_maker_rebate_event,
     update_live_temporal_inventory_maker_order,
 )
+from ..strategy_truth import strategy_validation_gate
 from .polymarket_live_client import PolymarketLiveCompleteSetClient, PolymarketLivePreflight
 
 
@@ -324,6 +326,11 @@ def run_live_temporal_inventory_maker_cycle(
             )
         )
 
+    validation_gate = (
+        strategy_validation_gate(settings, "temporal_inventory_maker")
+        if settings.live_temporal_inventory_maker_require_validation_gate
+        else {"passed": True, "status": "disabled", "reasons": []}
+    )
     gate_reason = ""
     if mode == "live" and not armed:
         gate_reason = "live maker mode not armed; set confirmation string locally"
@@ -333,6 +340,8 @@ def run_live_temporal_inventory_maker_cycle(
         gate_reason = "live maker reconciliation probe failed"
     elif bool(settings.live_temporal_inventory_maker_require_positive_paper_pnl) and float(paper_summary.get("marked_pnl_usdc") or 0.0) < 0.0:
         gate_reason = "paper temporal inventory maker marked PnL is negative"
+    elif mode == "live" and not bool(validation_gate.get("passed")):
+        gate_reason = "strategy validation blocked: " + "; ".join(str(item) for item in validation_gate.get("reasons", []))
     elif mode == "live" and clob_cash > 0.0 and clob_cash < float(settings.live_temporal_inventory_maker_base_order_usdc):
         gate_reason = "CLOB cash below base live maker order"
     elif _local_live_loss_24h(settings, ts=ts) >= float(settings.live_temporal_inventory_maker_daily_loss_limit_usdc):
@@ -426,6 +435,31 @@ def run_live_temporal_inventory_maker_cycle(
             )
             if status == "open":
                 submitted.append(row)
+                try:
+                    scoring = live_client.get_order_scoring_status(order_id) if order_id else {"available": False, "scoring": None}
+                    scoring_value = scoring.get("scoring")
+                    scoring_status = "scoring" if scoring_value is True else "not_scoring" if scoring_value is False else "unavailable"
+                    record_maker_rebate_event(
+                        settings,
+                        ts=ts,
+                        strategy_id="temporal_inventory_maker",
+                        market_id=market_id,
+                        order_id=order_id,
+                        scoring_status=scoring_status,
+                        rebate_usdc=0.0,
+                        metadata=scoring,
+                    )
+                except Exception as scoring_exc:
+                    record_maker_rebate_event(
+                        settings,
+                        ts=ts,
+                        strategy_id="temporal_inventory_maker",
+                        market_id=market_id,
+                        order_id=order_id,
+                        scoring_status="error",
+                        rebate_usdc=0.0,
+                        metadata={"error": str(scoring_exc)},
+                    )
             else:
                 failures.append(row)
             placed += 1
@@ -463,6 +497,7 @@ def run_live_temporal_inventory_maker_cycle(
         "blocks": blocks,
         "cancelled": cancelled,
         "failures": failures,
+        "validation_gate": validation_gate,
         "clob_cash_usdc": round(clob_cash, 6),
         "clob_open_orders": clob_open_orders,
         "notes": notes,

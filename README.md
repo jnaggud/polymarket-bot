@@ -124,6 +124,24 @@ python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
 
 Then open `http://127.0.0.1:8090`. The cockpit also exposes its compact refresh payload at `http://127.0.0.1:8090/api/state`.
 
+### Reload the latency dashboard after a code update
+
+The browser auto-refreshes data, but Python code changes require restarting the dashboard process. In the terminal running the dashboard, press `Ctrl-C`, then run:
+
+```bash
+python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
+```
+
+Reload `http://127.0.0.1:8090` with `Cmd-Shift-R` on macOS (`Ctrl-Shift-R` on Windows/Linux). If the latency engine was also running while configuration changed, restart its terminal too:
+
+```bash
+python3 main.py daemon-latency-bot-engine --interval 10
+```
+
+Use the **Strategy Truth** tab for canonical comparisons. It separates legacy/model PnL, execution-realistic paper PnL, observed maker rebates, and wallet-reconciled PnL. `not loaded in fast mode` means a historical pane was intentionally skipped; it does not mean zero. `?mode=full` remains available for deep research, but the truth table is calculated in fast mode.
+
+New promoted trades start a separate `vwap_latency_partial_fill_v1` epoch. Historical top-of-book fills remain visible as legacy simulation and cannot pass the live gate. CEX latency, BTC fair value, late capture, and aggressive temporal quotes default to disabled. Live pilots remain disabled/dry-run and are capped at small notional until the 500-trade, 30-market-day, drawdown, concentration, and 95% EV validation gate passes.
+
 The temporal maker, guarded live-maker, and late-resolution settings are documented in `.env.example`. Live maker trading defaults to disabled and `dry_run`; do not add credentials or change the live confirmation gates in a committed file.
 
 Run the repository test suite with:

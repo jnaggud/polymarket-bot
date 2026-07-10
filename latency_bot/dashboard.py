@@ -15,6 +15,8 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from .config import LatencyBotSettings
+from .strategy.related_market_arb import build_related_market_constraint_graph
+from .strategy_truth import build_strategy_truth_rows
 from .storage import (
     connect_latency_bot_db,
     init_latency_bot_db,
@@ -284,6 +286,9 @@ def _build_interactive_dashboard_payload(state: dict[str, Any]) -> dict[str, Any
             "generated_at_ct": datetime.now(DISPLAY_TZ).strftime("%H:%M:%S CT"),
             "fast_mode": bool(state.get("fast_mode")),
             "served_from_cache": bool(state.get("served_from_cache")),
+            "strategy_truth": _list_value(state.get("strategy_truth")),
+            "related_market_graph": _dict_value(state.get("related_market_graph")),
+            "data_availability": _dict_value(state.get("data_availability")),
             "status": {
                 "runner_status": status.get("runner_status", "unknown"),
                 "phase": status.get("phase", "bootstrap"),
@@ -702,14 +707,14 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       <div class="ops-tape" id="ops-tape"></div>
       <div class="ops-hero">
         <div class="hero-card">
-          <div class="panel-kicker"><span>Temporal Inventory</span><span id="temporal-state-badge" class="badge">SYNC</span></div>
+          <div class="panel-kicker"><span>Truth Leader</span><span id="temporal-state-badge" class="badge">SYNC</span></div>
           <div class="big-money" id="hero-equity">$0.00</div>
           <div class="ops-subtitle" id="hero-subtitle">paper inventory maker</div>
           <svg class="sparkline" id="temporal-spark" viewBox="0 0 420 116" preserveAspectRatio="none"></svg>
           <div class="hero-stats">
-            <div class="micro-stat"><div class="micro-label">Realized</div><div class="micro-value" id="hero-realized">$0.00</div></div>
-            <div class="micro-stat"><div class="micro-label">Marked</div><div class="micro-value" id="hero-marked">$0.00</div></div>
-            <div class="micro-stat"><div class="micro-label">Fill Rate</div><div class="micro-value" id="hero-fillrate">0.0%</div></div>
+            <div class="micro-stat"><div class="micro-label">Selected PnL</div><div class="micro-value" id="hero-realized">$0.00</div></div>
+            <div class="micro-stat"><div class="micro-label">Closed</div><div class="micro-value" id="hero-marked">0</div></div>
+            <div class="micro-stat"><div class="micro-label">Validation</div><div class="micro-value" id="hero-fillrate">blocked</div></div>
           </div>
         </div>
         <div class="hero-card">
@@ -724,6 +729,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       <div class="ops-cycle" id="ops-cycle"></div>
       <div class="ops-tabs" role="tablist">
         <button class="ops-tab" type="button" data-tab="command" aria-selected="true">Command</button>
+        <button class="ops-tab" type="button" data-tab="truth">Strategy Truth</button>
         <button class="ops-tab" type="button" data-tab="temporal">Temporal</button>
         <button class="ops-tab" type="button" data-tab="live">Live Maker</button>
         <button class="ops-tab" type="button" data-tab="late">Late Capture</button>
@@ -742,6 +748,19 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
               <div class="ops-panel"><h3>Asset Heatmap</h3><div class="ops-panel-content" id="asset-heatmap"></div></div>
               <div class="ops-panel"><h3>Quote Scatter</h3><canvas class="scatter-canvas" id="scatter-canvas"></canvas></div>
             </div>
+          </div>
+          <div class="tab-pane" data-pane="truth">
+            <div class="ops-panel full">
+              <div class="panel-kicker"><span>Canonical Strategy Results</span><span>model / paper / rebates / wallet</span></div>
+              <div class="ops-tabs" id="truth-timeframes">
+                <button class="ops-tab" type="button" data-truth-period="all" aria-selected="true">All</button>
+                <button class="ops-tab" type="button" data-truth-period="30d">30d</button>
+                <button class="ops-tab" type="button" data-truth-period="7d">7d</button>
+                <button class="ops-tab" type="button" data-truth-period="24h">24h</button>
+              </div>
+              <div class="ops-panel-content" id="strategy-truth-table"></div>
+            </div>
+            <div class="ops-panel full"><h3>Related-Market Constraint Graph</h3><div class="ops-panel-content" id="constraint-graph-table"></div></div>
           </div>
           <div class="tab-pane" data-pane="temporal">
             <div class="data-cards" id="temporal-cards"></div>
@@ -778,6 +797,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       const initial = window.__LATENCY_DASHBOARD_INITIAL__ || {};
       let state = initial;
       let activeTab = "command";
+      let truthTimeframe = "all";
       const qs = new URLSearchParams(window.location.search);
       const mode = qs.get("mode") || (initial.fast_mode ? "fast" : "full");
       const $ = (id) => document.getElementById(id);
@@ -787,6 +807,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       };
       const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
       const money = (value) => `${n(value) < 0 ? "-" : ""}$${Math.abs(n(value)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const maybeMoney = (value) => value === null || value === undefined ? "—" : money(value);
       const num = (value) => Math.round(n(value)).toLocaleString();
       const pct = (value, places = 1) => `${(100 * n(value)).toFixed(places)}%`;
       const px = (value) => n(value).toFixed(4);
@@ -872,16 +893,19 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         const temporal = data.temporal?.summary || {};
         const live = data.live_temporal?.summary || {};
         const late = data.late_resolution?.summary || {};
+        const truthRows = (data.strategy_truth || []).filter((item) => item.data_status === "loaded" && item.execution_tier === "executable_paper" && Boolean(item.enabled));
+        const leader = truthRows.sort((a, b) => n(b.timeframes?.all?.net_pnl_usdc) - n(a.timeframes?.all?.net_pnl_usdc))[0] || {};
+        const leaderStats = leader.timeframes?.all || {};
         setText("ops-clock", new Date().toLocaleTimeString([], { hour12: false }));
-        setText("hero-equity", money(temporal.equity_usdc || temporal.starting_capital_usdc || 0));
-        setHTML("hero-realized", `<span class="${posClass(temporal.realized_pnl_usdc)}">${money(temporal.realized_pnl_usdc || 0)}</span>`);
-        setHTML("hero-marked", `<span class="${posClass(temporal.marked_pnl_usdc)}">${money(temporal.marked_pnl_usdc || 0)}</span>`);
-        setText("hero-fillrate", pct(temporal.quote_fill_rate || 0));
-        setText("hero-subtitle", `${num(temporal.tracked_markets || temporal.open_markets || 0)} lifecycle markets / ${num(temporal.quote_open || 0)} open quotes`);
+        setText("hero-equity", money(leaderStats.net_pnl_usdc || 0));
+        setHTML("hero-realized", `<span class="${posClass(leaderStats.net_pnl_usdc)}">${money(leaderStats.net_pnl_usdc || 0)}</span>`);
+        setText("hero-marked", num(leaderStats.closed || 0));
+        setText("hero-fillrate", leader.validation?.status || "blocked");
+        setText("hero-subtitle", `${leader.label || "No validated strategy"} / ${leader.execution_tier || "no data"}`);
         const temporalBadge = $("temporal-state-badge");
         if (temporalBadge) {
-          temporalBadge.className = badgeClass(Boolean(temporal.enabled), n(temporal.quote_open || 0) > 0);
-          temporalBadge.textContent = temporal.enabled ? "ACTIVE" : "OFF";
+          temporalBadge.className = badgeClass(Boolean(leader.validation?.passed), Boolean(leaderStats.closed));
+          temporalBadge.textContent = leader.validation?.passed ? "PASSED" : "PAPER";
         }
         const liveBadge = $("live-gate-badge");
         if (liveBadge) {
@@ -889,7 +913,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
           liveBadge.className = badgeClass(armed, live.pilot_mode === "dry_run");
           liveBadge.textContent = armed ? "ARMED" : (live.pilot_mode || "DRY");
         }
-        renderSparkline(data.temporal?.equity_curve || [], temporal.starting_capital_usdc || 1000);
+        renderSparkline([], leaderStats.net_pnl_usdc || 0);
         setHTML("strategy-stack", [
           ["Temporal Maker", temporal.enabled ? "enabled" : "disabled", `${money(temporal.realized_pnl_usdc || 0)} realized / ${pct(temporal.quote_fill_rate || 0)} fills`, temporal.enabled],
           ["Live Maker", live.pilot_mode || "dry_run", `${num(live.dry_run_24h || 0)} dry-run / ${num(live.submitted_24h || 0)} submitted`, Boolean(live.armed_for_live_orders)],
@@ -902,6 +926,43 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
           graphBadge.className = badgeClass(!stale, false);
           graphBadge.textContent = stale ? "ERROR" : "LIVE";
         }
+      }
+      function renderTruth(data) {
+        const rows = data.strategy_truth || [];
+        setHTML("strategy-truth-table", table(
+          ["Strategy", "Tier", "Enabled", "Status", "Closed", "Win", "Selected PnL", "Model", "Executable Paper", "Actual Rebates", "Wallet", "Max DD", "95% EV", "Gate"],
+          rows.map((item) => {
+            const stats = item.timeframes?.[truthTimeframe] || {};
+            return [
+              esc(item.label || item.strategy_id || ""),
+              esc(item.execution_tier || ""),
+              esc(Boolean(item.enabled)),
+              esc(item.data_status === "not_loaded_fast" ? "not loaded in fast mode" : item.data_status || ""),
+              num(stats.closed || 0),
+              pct(stats.win_rate || 0),
+              `<span class="${posClass(stats.net_pnl_usdc)}">${money(stats.net_pnl_usdc || 0)}</span>`,
+              maybeMoney(item.model_pnl_usdc),
+              maybeMoney(item.executable_paper_pnl_usdc),
+              maybeMoney(item.rebate_pnl_usdc),
+              item.wallet_reconciled ? maybeMoney(item.wallet_pnl_usdc) : "not reconciled",
+              money(stats.max_drawdown_usdc || 0),
+              money(stats.lower_95_trade_ev_usdc || 0),
+              `<span class="${badgeClass(Boolean(item.validation?.passed), false)}" title="${esc((item.validation?.reasons || []).join('; '))}">${esc(item.validation?.status || "blocked")}</span>`,
+            ];
+          })
+        ));
+        const graph = data.related_market_graph || {};
+        setHTML("constraint-graph-table", table(
+          ["Group", "Legs", "Cost", "Edge", "Capacity", "Execution"],
+          (graph.opportunities || []).map((item) => [
+            esc(item.group_id || ""),
+            num((item.legs || []).length),
+            px(item.total_cost || 0),
+            px(item.edge_per_share || 0),
+            money(item.max_notional_usdc || 0),
+            esc(item.requires_atomic_or_preowned_execution ? "atomic/pre-owned required" : "research"),
+          ])
+        ) + `<div class="activity-meta">${esc(graph.warning || "")}</div>`);
       }
       function renderCycle(data) {
         const steps = ["Scan", "Detect", "Validate", "Size", "Fill", "Settle"];
@@ -989,6 +1050,8 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
           { label: "Submitted 24h", value: num(live.submitted_24h || 0) },
           { label: "Blocked 24h", value: num(live.blocked_24h || 0) },
           { label: "Cancel-All", value: esc(Boolean(live.last_heartbeat_cancel_all_ok)) },
+          { label: "Reward Scoring", value: num(live.reward_scoring_orders || 0) },
+          { label: "Actual Rebates", value: money(live.actual_rebate_pnl_usdc || 0) },
         ]));
         setHTML("live-orders", table(["Created", "Market", "Side", "Px", "Size", "Status", "Decision", "Edge", "Reason"], (data.live_temporal?.recent_orders || []).map((item) => [
           esc(shortTs(item.ts_created)),
@@ -1232,6 +1295,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         renderHero(state);
         renderCycle(state);
         renderCommand(state);
+        renderTruth(state);
         renderTemporal(state);
         renderLive(state);
         renderLate(state);
@@ -1253,12 +1317,20 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         }
       }
       document.querySelectorAll(".ops-tab").forEach((button) => {
+        if (button.dataset.truthPeriod) return;
         button.addEventListener("click", () => {
           activeTab = button.dataset.tab || "command";
           document.querySelectorAll(".ops-tab").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button)));
           document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === activeTab));
           drawAgentGraph(state);
           drawScatter(state.temporal?.recent_quotes || []);
+        });
+      });
+      document.querySelectorAll("[data-truth-period]").forEach((button) => {
+        button.addEventListener("click", () => {
+          truthTimeframe = button.dataset.truthPeriod || "all";
+          document.querySelectorAll("[data-truth-period]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderTruth(state);
         });
       });
       window.addEventListener("resize", () => {
@@ -1650,8 +1722,14 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         settings,
         cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
     )
+    strategy_truth = build_strategy_truth_rows(settings)
+    related_market_graph = build_related_market_constraint_graph(
+        settings,
+        markets_payload=markets,
+        polymarket_cache=polymarket_cache,
+    )
     promoted_variant_stats = (
-        {"summary": {}, "variants": []}
+        {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}, "variants": []}
         if fast
         else latency_bot_promoted_variant_performance_stats(
             settings,
@@ -1678,8 +1756,8 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     live_strategy_equity_curves = [] if fast else latency_bot_live_strategy_equity_curves(settings)
     shadow_stats = {} if fast else latency_bot_shadow_performance_stats(settings)
     complete_set_arb_stats = {} if fast else latency_bot_complete_set_arb_stats(settings)
-    cex_latency_paper = {} if fast else latency_bot_cex_latency_paper_stats(settings)
-    btc_fair_value_paper = {} if fast else latency_bot_btc_fair_value_paper_stats(settings)
+    cex_latency_paper = {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}} if fast else latency_bot_cex_latency_paper_stats(settings)
+    btc_fair_value_paper = {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}} if fast else latency_bot_btc_fair_value_paper_stats(settings)
     temporal_inventory_maker_paper = latency_bot_temporal_inventory_maker_paper_stats(settings)
     live_temporal_inventory_maker = latency_bot_live_temporal_inventory_maker_stats(settings)
     late_resolution_capture_paper = latency_bot_late_resolution_capture_paper_stats(settings)
@@ -1719,6 +1797,16 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         "open_positions": open_positions,
         "open_shadow_positions": open_shadow_positions,
         "portfolio": portfolio,
+        "strategy_truth": strategy_truth,
+        "related_market_graph": related_market_graph,
+        "data_availability": {
+            "promoted_variant_stats": "not_loaded_fast" if fast else "loaded",
+            "cex_latency_paper": "not_loaded_fast" if fast else "loaded",
+            "btc_fair_value_paper": "not_loaded_fast" if fast else "loaded",
+            "shadow_research": "not_loaded_fast" if fast else "loaded",
+            "complete_set_research": "not_loaded_fast" if fast else "loaded",
+            "wallet_reconciliation": "not_loaded_fast" if fast else "loaded",
+        },
         "promoted_variant_stats": promoted_variant_stats,
         "signal_stats": signal_stats,
         "enabled_signal_stats": enabled_signal_stats,
@@ -1863,12 +1951,12 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Open Positions", html.escape(_fmt_num(status.get("open_positions_count", 0)))],
         ["Capital Currently In Use", html.escape(_fmt_money(capital_usage.get("total_current_capital_usdc", 0.0)))],
         ["Current Capital / Bankroll", html.escape(f"{100.0 * float(capital_usage.get('total_current_bankroll_fraction', 0.0)):.1f}%")],
-        ["Realized PnL", html.escape(_fmt_money(portfolio.get("realized_pnl_usdc", status.get("realized_pnl_usdc", 0.0))))],
-        ["Dollars / Day Realized", html.escape(_fmt_money(portfolio.get("realized_usdc_per_day", 0.0)))],
-        ["Projected Monthly Revenue", html.escape(_fmt_money(portfolio.get("projected_monthly_revenue_usdc", 0.0)))],
-        ["Projected Yearly Revenue", html.escape(_fmt_money(portfolio.get("projected_yearly_revenue_usdc", 0.0)))],
-        ["Unrealized PnL", html.escape(_fmt_money(portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0))))],
-        ["Equity", html.escape(_fmt_money(portfolio.get("equity_usdc", bankroll_usdc)))],
+        ["Legacy Shared Paper Realized PnL", html.escape(_fmt_money(portfolio.get("realized_pnl_usdc", status.get("realized_pnl_usdc", 0.0))))],
+        ["Legacy Shared 24h PnL", html.escape(_fmt_money(portfolio.get("realized_usdc_per_day", 0.0)))],
+        ["Legacy 24h x 30 Projection", html.escape(_fmt_money(portfolio.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Legacy 24h x 365 Projection", html.escape(_fmt_money(portfolio.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Legacy Shared Unrealized PnL", html.escape(_fmt_money(portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0))))],
+        ["Legacy Shared Paper Equity", html.escape(_fmt_money(portfolio.get("equity_usdc", bankroll_usdc)))],
         ["CEX Paper Model", html.escape(str(cex_latency_summary.get("model") or "-"))],
         ["CEX Paper Equity", html.escape(_fmt_money(cex_latency_summary.get("equity_usdc", 0.0)))],
         ["CEX Paper Net PnL", html.escape(_fmt_money(cex_latency_summary.get("net_pnl", 0.0)))],
@@ -2100,6 +2188,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(promoted_execution_result.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(promoted_execution_result.get("closed_positions_count", 0)))],
     ]
+    if promoted_summary.get("data_status") == "not_loaded_fast":
+        promoted_summary_rows = [["Data", "Not loaded in fast mode; use the Strategy Truth tab or ?mode=full"]]
     promoted_variant_table = _table(
         [
             "Variant",
@@ -2485,6 +2575,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(cex_latency_execution.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(cex_latency_execution.get("closed_positions_count", 0)))],
     ]
+    if cex_latency_summary.get("data_status") == "not_loaded_fast":
+        cex_latency_summary_rows = [["Data", "Not loaded in fast mode; canonical historical PnL remains in Strategy Truth"]]
     cex_latency_signal_table = _table(
         ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
         [
@@ -2591,6 +2683,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(btc_fair_value_execution.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(btc_fair_value_execution.get("closed_positions_count", 0)))],
     ]
+    if btc_fair_value_summary.get("data_status") == "not_loaded_fast":
+        btc_fair_value_summary_rows = [["Data", "Not loaded in fast mode; canonical historical PnL remains in Strategy Truth"]]
     btc_fair_value_signal_table = _table(
         ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
         [

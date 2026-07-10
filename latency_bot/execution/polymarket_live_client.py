@@ -275,6 +275,30 @@ class PolymarketLiveCompleteSetClient:
             "fallback": "cancel_each_open_order",
         }
 
+    def get_order_scoring_status(self, order_id: str) -> dict[str, Any]:
+        """Return observed liquidity-reward scoring status for a submitted order."""
+        preflight = self._preflight_account()
+        if not preflight.ok:
+            raise RuntimeError(preflight.reason)
+        client = self._build_client()
+        method = self._method(
+            client,
+            "is_order_scoring",
+            "isOrderScoring",
+            "get_order_scoring",
+            "getOrderScoring",
+        )
+        if method is None:
+            return {"available": False, "scoring": None, "reason": "official CLOB client has no order-scoring method"}
+        response: Any = method(order_id)
+        if isinstance(response, dict):
+            scoring = response.get("scoring")
+            if scoring is None:
+                scoring = response.get("is_scoring", response.get("isScoring"))
+        else:
+            scoring = response if isinstance(response, bool) else None
+        return {"available": True, "scoring": scoring, "response": response}
+
     def get_collateral_balance_allowance(self) -> dict[str, Any]:
         preflight = self._preflight_account()
         if not preflight.ok:

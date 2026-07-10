@@ -700,6 +700,8 @@ def build_temporal_inventory_maker_paper_signals(
             passive = candidate(best_bid_value + tick, "PASSIVE")
             midpoint = candidate((best_bid_value + best_ask_value) / 2.0, "MID_AGGRESSIVE")
             near_touch = candidate(post_only_ceiling, "NEAR_TOUCH")
+            if not settings.temporal_inventory_maker_paper_aggressive_quotes_enabled:
+                return passive
             if near_touch[1] >= float(settings.temporal_inventory_maker_paper_near_touch_min_edge):
                 return near_touch
             if midpoint[1] >= float(settings.temporal_inventory_maker_paper_mid_aggressive_min_edge):
