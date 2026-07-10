@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import html
 import json
+import math
 import os
 import threading
 import time
@@ -14,6 +15,8 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from .config import LatencyBotSettings
+from .strategy.related_market_arb import build_related_market_constraint_graph
+from .strategy_truth import build_strategy_truth_rows
 from .storage import (
     connect_latency_bot_db,
     init_latency_bot_db,
@@ -202,6 +205,1140 @@ def _render_variant_equity_curves(points: list[dict[str, Any]], bankroll_usdc: f
     for variant_id, variant_points in sorted(by_variant.items()):
         rendered.append(f"<h3>{html.escape(variant_id)}</h3>{_render_equity_curve(variant_points, bankroll_usdc)}")
     return "".join(rendered)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else 0.0
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _compact_market_item(item: Any) -> dict[str, Any]:
+    row = _dict_value(item)
+    return {
+        "question": row.get("question") or row.get("title") or "",
+        "asset": row.get("asset") or "",
+        "tenor_minutes": row.get("tenor_minutes", 0),
+        "hours_to_expiry": row.get("hours_to_expiry", 0.0),
+        "best_bid": row.get("best_bid", row.get("bid", 0.0)),
+        "best_ask": row.get("best_ask", row.get("ask", 0.0)),
+        "midpoint": row.get("midpoint", row.get("mid", 0.0)),
+        "min_depth_usdc": row.get("min_depth_usdc", row.get("depth_usdc", 0.0)),
+        "seen_at": row.get("seen_at") or row.get("updated_at") or "",
+    }
+
+
+def _compact_binance_item(item: Any) -> dict[str, Any]:
+    row = _dict_value(item)
+    return {
+        "symbol": row.get("symbol") or "",
+        "asset": row.get("asset") or "",
+        "bid": row.get("bid", 0.0),
+        "ask": row.get("ask", 0.0),
+        "mid": row.get("mid", 0.0),
+        "seen_at": row.get("seen_at") or row.get("updated_at") or "",
+        "source_latency_ms": row.get("source_latency_ms", 0.0),
+    }
+
+
+def _build_interactive_dashboard_payload(state: dict[str, Any]) -> dict[str, Any]:
+    status = _dict_value(state.get("status"))
+    db_summary = _dict_value(state.get("db_summary"))
+    recent_counts = _dict_value(db_summary.get("recent_counts"))
+    latest_cycle = _dict_value(db_summary.get("latest_cycle"))
+    temporal = _dict_value(state.get("temporal_inventory_maker_paper"))
+    temporal_summary = _dict_value(temporal.get("summary"))
+    live_temporal = _dict_value(state.get("live_temporal_inventory_maker"))
+    live_temporal_summary = _dict_value(live_temporal.get("summary"))
+    late_resolution = _dict_value(state.get("late_resolution_capture_paper"))
+    late_resolution_summary = _dict_value(late_resolution.get("summary"))
+    cex_latency = _dict_value(state.get("cex_latency_paper"))
+    cex_latency_summary = _dict_value(cex_latency.get("summary"))
+    btc_fair = _dict_value(state.get("btc_fair_value_paper"))
+    btc_fair_summary = _dict_value(btc_fair.get("summary"))
+    portfolio = _dict_value(state.get("portfolio"))
+    capital_usage = _dict_value(state.get("capital_usage"))
+    polymarket_cache = _dict_value(state.get("polymarket_cache"))
+    binance_cache = _dict_value(state.get("binance_cache"))
+    market_items = [_compact_market_item(item) for item in _list_value(polymarket_cache.get("items"))[:60]]
+    binance_items = [_compact_binance_item(item) for item in _list_value(binance_cache.get("items"))[:20]]
+    last_cycle_result = _dict_value(status.get("last_cycle_result"))
+    live_temporal_result = _dict_value(last_cycle_result.get("live_temporal_inventory_maker"))
+    late_resolution_result = _dict_value(last_cycle_result.get("late_resolution_capture_paper"))
+    temporal_result = _dict_value(last_cycle_result.get("temporal_inventory_maker_paper"))
+    return _json_safe(
+        {
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at_ct": datetime.now(DISPLAY_TZ).strftime("%H:%M:%S CT"),
+            "fast_mode": bool(state.get("fast_mode")),
+            "served_from_cache": bool(state.get("served_from_cache")),
+            "strategy_truth": _list_value(state.get("strategy_truth")),
+            "related_market_graph": _dict_value(state.get("related_market_graph")),
+            "data_availability": _dict_value(state.get("data_availability")),
+            "status": {
+                "runner_status": status.get("runner_status", "unknown"),
+                "phase": status.get("phase", "bootstrap"),
+                "risk_state": status.get("risk_state", "unknown"),
+                "tracked_markets_count": status.get("tracked_markets_count", 0),
+                "open_orders_count": status.get("open_orders_count", 0),
+                "open_positions_count": status.get("open_positions_count", 0),
+                "last_cycle_started_at": status.get("last_cycle_started_at"),
+                "last_cycle_completed_at": status.get("last_cycle_completed_at"),
+                "last_error": status.get("last_error") or "",
+                "notes": _list_value(status.get("notes"))[:8],
+            },
+            "latest_cycle": latest_cycle,
+            "counts": recent_counts,
+            "portfolio": {
+                "realized_pnl_usdc": portfolio.get("realized_pnl_usdc", status.get("realized_pnl_usdc", 0.0)),
+                "unrealized_pnl_usdc": portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0)),
+                "equity_usdc": portfolio.get("equity_usdc", state.get("bankroll_usdc", 0.0)),
+                "realized_usdc_per_day": portfolio.get("realized_usdc_per_day", 0.0),
+                "projected_monthly_revenue_usdc": portfolio.get("projected_monthly_revenue_usdc", 0.0),
+            },
+            "capital": {
+                "bankroll_usdc": capital_usage.get("bankroll_usdc", state.get("bankroll_usdc", 0.0)),
+                "total_current_capital_usdc": capital_usage.get("total_current_capital_usdc", 0.0),
+                "total_current_bankroll_fraction": capital_usage.get("total_current_bankroll_fraction", 0.0),
+                "open_order_capital_usdc": capital_usage.get("open_order_capital_usdc", 0.0),
+                "live_position_capital_usdc": capital_usage.get("live_position_capital_usdc", 0.0),
+            },
+            "temporal": {
+                "summary": temporal_summary,
+                "execution": _dict_value(temporal_result.get("execution")),
+                "equity_curve": _list_value(temporal.get("equity_curve"))[-120:],
+                "markets": _list_value(temporal.get("markets"))[:20],
+                "recent_events": _list_value(temporal.get("recent_events"))[:30],
+                "recent_quotes": _list_value(temporal.get("recent_quotes"))[:30],
+                "quote_style_breakdown": _list_value(temporal.get("quote_style_breakdown"))[:12],
+                "exit_reason_breakdown": _list_value(temporal.get("exit_reason_breakdown"))[:12],
+            },
+            "live_temporal": {
+                "summary": live_temporal_summary,
+                "execution": _dict_value(live_temporal_result.get("execution")),
+                "recent_orders": _list_value(live_temporal.get("recent_orders"))[:30],
+            },
+            "late_resolution": {
+                "summary": late_resolution_summary,
+                "execution": _dict_value(late_resolution_result.get("execution")),
+                "equity_curve": _list_value(late_resolution.get("equity_curve"))[-120:],
+                "open_positions": _list_value(late_resolution.get("open_positions"))[:20],
+                "recent_closes": _list_value(late_resolution.get("recent_closes"))[:20],
+                "recent_signals": _list_value(late_resolution.get("recent_signals"))[:30],
+                "reason_breakdown": _list_value(late_resolution.get("reason_breakdown"))[:12],
+            },
+            "research": {
+                "cex_latency": cex_latency_summary,
+                "btc_fair": btc_fair_summary,
+            },
+            "markets": {
+                "updated_at": polymarket_cache.get("updated_at"),
+                "source": polymarket_cache.get("source"),
+                "count": polymarket_cache.get("count", len(market_items)),
+                "items": market_items,
+            },
+            "binance": {
+                "updated_at": binance_cache.get("updated_at"),
+                "source": binance_cache.get("source"),
+                "count": binance_cache.get("count", 0),
+                "items": binance_items,
+            },
+            "recent_signals": _list_value(state.get("recent_signals"))[:18],
+            "recent_fair_values": _list_value(state.get("recent_fair_values"))[:18],
+            "recent_fills": _list_value(state.get("recent_fills"))[:18],
+            "recent_orders": _list_value(state.get("recent_orders"))[:18],
+        }
+    )
+
+
+def _serialize_interactive_dashboard_payload(state: dict[str, Any]) -> str:
+    return json.dumps(
+        _build_interactive_dashboard_payload(state),
+        allow_nan=False,
+        separators=(",", ":"),
+    ).replace("</", "<\\/")
+
+
+def _render_interactive_cockpit(state: dict[str, Any]) -> str:
+    payload_json = _serialize_interactive_dashboard_payload(state)
+    template = r"""
+  <style>
+    .cockpit {
+      --ink: #111827;
+      --muted: #64748b;
+      --line: #d8e0eb;
+      --panel: rgba(255, 255, 255, 0.92);
+      --good: #079669;
+      --warn: #d97706;
+      --bad: #dc2626;
+      --cyan: #0891b2;
+      --violet: #7c3aed;
+      margin: 18px 0 20px;
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .cockpit * { box-sizing: border-box; }
+    .ops-shell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #eef3f8 0%, #f8fbfd 100%);
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+    }
+    .ops-topbar {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #e8eef5;
+    }
+    .ops-brand {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      min-width: 0;
+    }
+    .ops-mark {
+      width: 26px;
+      height: 26px;
+      border: 2px solid #d18a00;
+      border-radius: 7px;
+      color: #d18a00;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+    }
+    .ops-title {
+      font-weight: 850;
+      letter-spacing: .08em;
+      font-size: 15px;
+      white-space: nowrap;
+    }
+    .ops-subtitle {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ops-clock {
+      font-variant-numeric: tabular-nums;
+      font-size: 23px;
+      letter-spacing: .05em;
+      text-align: right;
+      min-width: 190px;
+    }
+    .ops-tape {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 0;
+      border-bottom: 1px solid var(--line);
+      background: #f6f9fc;
+    }
+    .tape-item {
+      padding: 7px 12px;
+      border-right: 1px solid var(--line);
+      min-width: 0;
+      font-size: 12px;
+    }
+    .tape-label { color: var(--muted); font-weight: 750; letter-spacing: .09em; }
+    .tape-value { font-variant-numeric: tabular-nums; font-weight: 800; margin-left: 6px; }
+    .pos { color: var(--good); }
+    .neg { color: var(--bad); }
+    .warn { color: var(--warn); }
+    .ops-hero {
+      display: grid;
+      grid-template-columns: minmax(280px, .92fr) minmax(260px, .72fr) minmax(360px, 1.36fr);
+      min-height: 252px;
+      border-bottom: 1px solid var(--line);
+    }
+    .hero-card {
+      padding: 14px;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      min-width: 0;
+    }
+    .hero-card:last-child { border-right: 0; }
+    .panel-kicker {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .big-money {
+      font-size: clamp(34px, 5vw, 72px);
+      line-height: .95;
+      font-weight: 900;
+      color: #d88300;
+      font-variant-numeric: tabular-nums;
+      margin: 8px 0 5px;
+    }
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .micro-stat {
+      border-top: 3px solid #dbe5ee;
+      padding-top: 7px;
+      min-width: 0;
+    }
+    .micro-label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .micro-value {
+      font-size: 21px;
+      font-weight: 850;
+      font-variant-numeric: tabular-nums;
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: #334155;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 4px 8px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .badge.good { color: var(--good); border-color: rgba(7,150,105,.28); background: #ecfdf5; }
+    .badge.warn { color: var(--warn); border-color: rgba(217,119,6,.25); background: #fffbeb; }
+    .badge.bad { color: var(--bad); border-color: rgba(220,38,38,.24); background: #fef2f2; }
+    .sparkline {
+      width: 100%;
+      height: 116px;
+      display: block;
+      border: 1px solid #e1e9f2;
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+    .strategy-stack {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .strategy-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px;
+      border: 1px solid #dfe7f0;
+      border-radius: 8px;
+      background: #fff;
+      min-width: 0;
+    }
+    .strategy-name { font-weight: 850; font-size: 13px; }
+    .strategy-meta { color: var(--muted); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+    .ops-cycle {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f9fbfd;
+    }
+    .cycle-step {
+      position: relative;
+      min-height: 42px;
+      padding: 8px 10px 8px 28px;
+      border: 1px solid #dae3ee;
+      border-radius: 8px;
+      background: #fff;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      overflow: hidden;
+    }
+    .cycle-step::before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 15px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #9ca3af;
+      box-shadow: 0 0 0 4px rgba(148,163,184,.12);
+    }
+    .cycle-step.active { border-color: rgba(8,145,178,.42); box-shadow: inset 0 -3px 0 rgba(8,145,178,.25); color: #0f172a; }
+    .cycle-step.active::before { background: var(--cyan); box-shadow: 0 0 0 5px rgba(8,145,178,.13); }
+    .ops-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #eef4f9;
+    }
+    .ops-tab {
+      border: 1px solid #cfdae7;
+      border-radius: 8px;
+      background: #fff;
+      color: #334155;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 850;
+      cursor: pointer;
+    }
+    .ops-tab[aria-selected="true"] { background: #0f172a; color: #fff; border-color: #0f172a; }
+    .ops-controls { margin-left: auto; display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 12px; }
+    .ops-body {
+      display: grid;
+      grid-template-columns: minmax(360px, 1.18fr) minmax(300px, .82fr);
+      gap: 0;
+      min-height: 450px;
+    }
+    .ops-main, .ops-side { padding: 14px; min-width: 0; }
+    .ops-main { border-right: 1px solid var(--line); }
+    .cockpit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .ops-panel {
+      border: 1px solid #dbe5ef;
+      border-radius: 8px;
+      background: rgba(255,255,255,.88);
+      overflow: hidden;
+      min-width: 0;
+    }
+    .ops-panel.full { grid-column: 1 / -1; }
+    .ops-panel h3 {
+      margin: 0;
+      padding: 10px 11px;
+      font-size: 12px;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+      background: #f4f8fb;
+      border-bottom: 1px solid #dbe5ef;
+    }
+    .ops-panel-content { padding: 10px; }
+    .agent-canvas, .scatter-canvas {
+      width: 100%;
+      height: 270px;
+      display: block;
+      background: #fbfdff;
+    }
+    .mini-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .mini-table th, .mini-table td { padding: 7px; border-bottom: 1px solid #e6edf5; vertical-align: top; }
+    .mini-table th { color: var(--muted); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
+    .activity-feed { display: grid; gap: 7px; max-height: 360px; overflow: auto; padding-right: 3px; }
+    .activity-item {
+      border: 1px solid #e1e9f2;
+      border-left: 4px solid #94a3b8;
+      border-radius: 8px;
+      padding: 8px 9px;
+      background: #fff;
+      font-size: 12px;
+    }
+    .activity-item.fill, .activity-item.locked_pair { border-left-color: var(--good); }
+    .activity-item.cancel, .activity-item.sell { border-left-color: var(--warn); }
+    .activity-item.expire, .activity-item.failed { border-left-color: var(--bad); }
+    .activity-title { display: flex; justify-content: space-between; gap: 10px; font-weight: 850; }
+    .activity-meta { color: var(--muted); margin-top: 3px; line-height: 1.35; overflow-wrap: anywhere; }
+    .heatmap { display: grid; gap: 6px; }
+    .heat-row { display: grid; grid-template-columns: 52px 1fr 58px; align-items: center; gap: 8px; font-size: 12px; }
+    .heat-bar { height: 20px; border-radius: 5px; background: #edf2f7; overflow: hidden; }
+    .heat-fill { height: 100%; min-width: 2px; background: linear-gradient(90deg, #0891b2, #10b981); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .data-cards { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 9px; margin-bottom: 12px; }
+    .data-card { border: 1px solid #dfe7f0; border-radius: 8px; padding: 9px; background: #fff; min-width: 0; }
+    .data-card .label { color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+    .data-card .value { font-size: 20px; font-weight: 900; font-variant-numeric: tabular-nums; margin-top: 3px; overflow-wrap: anywhere; }
+    details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+    details summary { cursor: pointer; color: var(--ink); }
+    @media (max-width: 1100px) {
+      .ops-topbar, .ops-hero, .ops-body { grid-template-columns: 1fr; }
+      .ops-main { border-right: 0; border-bottom: 1px solid var(--line); }
+      .ops-tape { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .ops-cycle { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cockpit-grid, .data-cards { grid-template-columns: 1fr; }
+      .ops-controls { width: 100%; margin-left: 0; justify-content: space-between; }
+    }
+  </style>
+  <section class="cockpit" id="interactive-cockpit" data-dashboard-cockpit>
+    <div class="ops-shell">
+      <div class="ops-topbar">
+        <div class="ops-brand">
+          <span class="ops-mark">Q</span>
+          <span class="ops-title">POLYMARKET LATENCY OPS</span>
+          <span class="ops-subtitle">PROMOTED 5M BASKET / TEMPORAL MAKER / LIVE GATES</span>
+        </div>
+        <div class="ops-clock" id="ops-clock">--:--:--</div>
+      </div>
+      <div class="ops-tape" id="ops-tape"></div>
+      <div class="ops-hero">
+        <div class="hero-card">
+          <div class="panel-kicker"><span>Truth Leader</span><span id="temporal-state-badge" class="badge">SYNC</span></div>
+          <div class="big-money" id="hero-equity">$0.00</div>
+          <div class="ops-subtitle" id="hero-subtitle">paper inventory maker</div>
+          <svg class="sparkline" id="temporal-spark" viewBox="0 0 420 116" preserveAspectRatio="none"></svg>
+          <div class="hero-stats">
+            <div class="micro-stat"><div class="micro-label">Selected PnL</div><div class="micro-value" id="hero-realized">$0.00</div></div>
+            <div class="micro-stat"><div class="micro-label">Closed</div><div class="micro-value" id="hero-marked">0</div></div>
+            <div class="micro-stat"><div class="micro-label">Validation</div><div class="micro-value" id="hero-fillrate">blocked</div></div>
+          </div>
+        </div>
+        <div class="hero-card">
+          <div class="panel-kicker"><span>Strategy Stack</span><span id="live-gate-badge" class="badge">DRY</span></div>
+          <div class="strategy-stack" id="strategy-stack"></div>
+        </div>
+        <div class="hero-card">
+          <div class="panel-kicker"><span>Market/Execution Map</span><span id="graph-health" class="badge">LIVE</span></div>
+          <canvas class="agent-canvas" id="agent-canvas"></canvas>
+        </div>
+      </div>
+      <div class="ops-cycle" id="ops-cycle"></div>
+      <div class="ops-tabs" role="tablist">
+        <button class="ops-tab" type="button" data-tab="command" aria-selected="true">Command</button>
+        <button class="ops-tab" type="button" data-tab="truth">Strategy Truth</button>
+        <button class="ops-tab" type="button" data-tab="temporal">Temporal</button>
+        <button class="ops-tab" type="button" data-tab="live">Live Maker</button>
+        <button class="ops-tab" type="button" data-tab="markets">Markets</button>
+        <div class="ops-controls">
+          <label><input type="checkbox" id="ops-freeze"> freeze</label>
+          <span id="ops-refresh-status">waiting</span>
+        </div>
+      </div>
+      <div class="ops-body">
+        <div class="ops-main">
+          <div class="tab-pane active" data-pane="command">
+            <div class="data-cards" id="command-cards"></div>
+            <div class="cockpit-grid">
+              <div class="ops-panel full"><h3>Quote Style Diagnostics</h3><div class="ops-panel-content" id="style-table"></div></div>
+              <div class="ops-panel"><h3>Asset Heatmap</h3><div class="ops-panel-content" id="asset-heatmap"></div></div>
+              <div class="ops-panel"><h3>Quote Scatter</h3><canvas class="scatter-canvas" id="scatter-canvas"></canvas></div>
+            </div>
+          </div>
+          <div class="tab-pane" data-pane="truth">
+            <div class="ops-panel full">
+              <div class="panel-kicker"><span>Canonical Strategy Results</span><span>model / paper / rebates / wallet</span></div>
+              <div class="ops-tabs" id="truth-timeframes">
+                <button class="ops-tab" type="button" data-truth-period="all" aria-selected="true">All</button>
+                <button class="ops-tab" type="button" data-truth-period="30d">30d</button>
+                <button class="ops-tab" type="button" data-truth-period="7d">7d</button>
+                <button class="ops-tab" type="button" data-truth-period="24h">24h</button>
+              </div>
+              <div class="ops-tabs" id="truth-views">
+                <button class="ops-tab" type="button" data-truth-view="active" aria-selected="true">Active</button>
+                <button class="ops-tab" type="button" data-truth-view="archive">Archive</button>
+                <button class="ops-tab" type="button" data-truth-view="all">All</button>
+              </div>
+              <div class="ops-panel-content" id="strategy-truth-table"></div>
+              <div class="ops-panel-content" id="promoted-basket-detail"></div>
+            </div>
+            <div class="ops-panel full" id="constraint-graph-panel"><h3>Related-Market Constraint Graph</h3><div class="ops-panel-content" id="constraint-graph-table"></div></div>
+          </div>
+          <div class="tab-pane" data-pane="temporal">
+            <div class="data-cards" id="temporal-cards"></div>
+            <div class="cockpit-grid">
+              <div class="ops-panel full"><h3>Recent Lifecycle Markets</h3><div class="ops-panel-content" id="temporal-markets"></div></div>
+              <div class="ops-panel full"><h3>Recent Simulated Maker Quotes</h3><div class="ops-panel-content" id="temporal-quotes"></div></div>
+            </div>
+          </div>
+          <div class="tab-pane" data-pane="live">
+            <div class="data-cards" id="live-cards"></div>
+            <div class="ops-panel"><h3>Recent Live Maker Decisions</h3><div class="ops-panel-content" id="live-orders"></div></div>
+          </div>
+          <div class="tab-pane" data-pane="markets">
+            <div class="data-cards" id="market-cards"></div>
+            <div class="ops-panel"><h3>Tracked Market Books</h3><div class="ops-panel-content" id="market-table"></div></div>
+          </div>
+        </div>
+        <aside class="ops-side">
+          <div class="ops-panel"><h3>Recent Lifecycle Events</h3><div class="ops-panel-content"><div class="activity-feed" id="activity-feed"></div></div></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+  <script>
+    window.__LATENCY_DASHBOARD_INITIAL__ = __INITIAL_STATE__;
+    (function () {
+      const initial = window.__LATENCY_DASHBOARD_INITIAL__ || {};
+      let state = initial;
+      let activeTab = "command";
+      let truthTimeframe = "all";
+      let truthView = "active";
+      const qs = new URLSearchParams(window.location.search);
+      const mode = qs.get("mode") || (initial.fast_mode ? "fast" : "full");
+      const $ = (id) => document.getElementById(id);
+      const n = (value) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+      const money = (value) => `${n(value) < 0 ? "-" : ""}$${Math.abs(n(value)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const maybeMoney = (value) => value === null || value === undefined ? "—" : money(value);
+      const num = (value) => Math.round(n(value)).toLocaleString();
+      const pct = (value, places = 1) => `${(100 * n(value)).toFixed(places)}%`;
+      const px = (value) => n(value).toFixed(4);
+      const posClass = (value) => n(value) > 0 ? "pos" : (n(value) < 0 ? "neg" : "");
+      const setHTML = (id, html) => {
+        const el = $(id);
+        if (el) el.innerHTML = html;
+      };
+      const setText = (id, text) => {
+        const el = $(id);
+        if (el) el.textContent = text;
+      };
+      function table(headers, rows) {
+        if (!rows.length) return `<div class="activity-meta">No data</div>`;
+        return `<table class="mini-table"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      }
+      function cards(items) {
+        return items.map((item) => `<div class="data-card"><div class="label">${esc(item.label)}</div><div class="value ${item.className || ""}">${item.value}</div></div>`).join("");
+      }
+      function badgeClass(ok, warn) {
+        if (ok) return "badge good";
+        if (warn) return "badge warn";
+        return "badge bad";
+      }
+      function phaseIndex(phase) {
+        const normalized = String(phase || "").toLowerCase();
+        if (normalized.includes("discovery") || normalized.includes("scan")) return 0;
+        if (normalized.includes("fair") || normalized.includes("signal") || normalized.includes("detect")) return 1;
+        if (normalized.includes("risk") || normalized.includes("validate")) return 2;
+        if (normalized.includes("size") || normalized.includes("capital")) return 3;
+        if (normalized.includes("execution") || normalized.includes("fill")) return 4;
+        if (normalized.includes("settle") || normalized.includes("close")) return 5;
+        return 1;
+      }
+      function promotedBasket(data) {
+        return (data.strategy_truth || []).find((item) => item.strategy_id === "promoted:directional_basket:v1") || {};
+      }
+      function renderSparkline(points, bankroll) {
+        const svg = $("temporal-spark");
+        if (!svg) return;
+        const values = (points || []).map((point) => n(point.equity_usdc || point.equity || bankroll)).filter((value) => Number.isFinite(value));
+        const series = values.length ? [n(bankroll), ...values] : [n(bankroll), n(bankroll)];
+        let min = Math.min(...series);
+        let max = Math.max(...series);
+        if (min === max) { min -= 1; max += 1; }
+        const w = 420, h = 116, pad = 10;
+        const pointFor = (value, index) => {
+          const x = pad + (index / Math.max(series.length - 1, 1)) * (w - pad * 2);
+          const y = h - pad - ((value - min) / (max - min)) * (h - pad * 2);
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        };
+        const path = series.map(pointFor).join(" ");
+        const baseline = h - pad - ((n(bankroll) - min) / (max - min)) * (h - pad * 2);
+        svg.innerHTML = `<line x1="0" y1="${baseline.toFixed(1)}" x2="${w}" y2="${baseline.toFixed(1)}" stroke="#cbd5e1" stroke-dasharray="4 4"/><polyline points="${path}" fill="none" stroke="#0f766e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${pointFor(series[series.length - 1], series.length - 1).split(",")[0]}" cy="${pointFor(series[series.length - 1], series.length - 1).split(",")[1]}" r="4" fill="#0f766e"/>`;
+      }
+      function assetAggregates(items) {
+        const groups = new Map();
+        (items || []).forEach((item) => {
+          const asset = String(item.asset || "UNK").toUpperCase();
+          const group = groups.get(asset) || { asset, count: 0, depth: 0, mid: 0, bestEdge: 0 };
+          group.count += 1;
+          group.depth += n(item.min_depth_usdc || item.depth_usdc || 0);
+          group.mid += n(item.midpoint || item.mid || 0);
+          group.bestEdge = Math.max(group.bestEdge, Math.abs(n(item.edge || 0)));
+          groups.set(asset, group);
+        });
+        return Array.from(groups.values()).map((group) => ({ ...group, mid: group.count ? group.mid / group.count : 0 })).sort((a, b) => b.depth - a.depth);
+      }
+      function renderTape(data) {
+        const temporal = data.temporal?.summary || {};
+        const live = data.live_temporal?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
+        const counts = data.counts || {};
+        const assets = assetAggregates(data.markets?.items || []).slice(0, 3);
+        const items = [
+          ["LIVE", `${data.status?.runner_status || "unknown"} / ${data.status?.phase || "-"}`],
+          ["BASKET PNL", money(basketStats.net_pnl_usdc || 0), n(basketStats.net_pnl_usdc || 0)],
+          ["TEMP PNL", money(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0), n(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0)],
+          ["LIVE MAKER", `${live.pilot_mode || "dry_run"} / ${num(live.dry_run_24h || 0)} dry`, 0],
+          ["BOOKS 60M", num(counts.polymarket_books || 0), 0],
+          [assets[0]?.asset || "MARKETS", `${num(data.markets?.count || 0)} tracked`, 0],
+        ];
+        setHTML("ops-tape", items.map(([label, value, score]) => `<div class="tape-item"><span class="tape-label">${esc(label)}</span><span class="tape-value ${posClass(score)}">${esc(value)}</span></div>`).join(""));
+      }
+      function renderHero(data) {
+        const temporal = data.temporal?.summary || {};
+        const live = data.live_temporal?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
+        const truthRows = (data.strategy_truth || []).filter((item) => item.data_status === "loaded" && item.execution_tier === "executable_paper" && Boolean(item.enabled));
+        const leader = basket.enabled ? basket : (truthRows.sort((a, b) => n(b.timeframes?.all?.net_pnl_usdc) - n(a.timeframes?.all?.net_pnl_usdc))[0] || {});
+        const leaderStats = leader.timeframes?.all || {};
+        setText("ops-clock", new Date().toLocaleTimeString([], { hour12: false }));
+        setText("hero-equity", money(leaderStats.net_pnl_usdc || 0));
+        setHTML("hero-realized", `<span class="${posClass(leaderStats.net_pnl_usdc)}">${money(leaderStats.net_pnl_usdc || 0)}</span>`);
+        setText("hero-marked", num(leaderStats.closed || 0));
+        setText("hero-fillrate", leader.data_status === "no_observations" ? "collecting" : (leader.validation?.status || "blocked"));
+        setText("hero-subtitle", `${leader.label || "No validated strategy"} / ${leader.execution_tier || "no data"}`);
+        const temporalBadge = $("temporal-state-badge");
+        if (temporalBadge) {
+          temporalBadge.className = badgeClass(Boolean(leader.validation?.passed), Boolean(leader.enabled));
+          temporalBadge.textContent = leader.validation?.passed ? "PASSED" : (leader.data_status === "no_observations" ? "COLLECTING" : "PAPER");
+        }
+        const liveBadge = $("live-gate-badge");
+        if (liveBadge) {
+          const armed = Boolean(live.armed_for_live_orders);
+          liveBadge.className = badgeClass(armed, live.pilot_mode === "dry_run");
+          liveBadge.textContent = armed ? "ARMED" : (live.pilot_mode || "DRY");
+        }
+        renderSparkline([], leaderStats.net_pnl_usdc || 0);
+        setHTML("strategy-stack", [
+          ["Promoted 5m Basket", basket.data_status === "no_observations" ? "collecting" : "paper", `${num(basket.member_count || 0)} ETH/BTC variants / ${num(basketStats.closed || 0)} closes / ${money(basketStats.net_pnl_usdc || 0)}`, Boolean(basket.enabled)],
+          ["Temporal Maker", temporal.enabled ? "enabled" : "disabled", `${money(temporal.realized_pnl_usdc || 0)} realized / ${pct(temporal.quote_fill_rate || 0)} fills`, temporal.enabled],
+          ["Live Maker", live.pilot_mode || "dry_run", `${num(live.dry_run_24h || 0)} dry-run / ${num(live.submitted_24h || 0)} submitted`, Boolean(live.armed_for_live_orders)],
+        ].map(([name, tag, meta, good]) => `<div class="strategy-row"><div><div class="strategy-name">${esc(name)}</div><div class="strategy-meta">${esc(meta)}</div></div><span class="${badgeClass(good, tag === "dry_run" || tag === "collecting")}">${esc(tag)}</span></div>`).join(""));
+        const graphBadge = $("graph-health");
+        if (graphBadge) {
+          const stale = Boolean(data.status?.last_error);
+          graphBadge.className = badgeClass(!stale, false);
+          graphBadge.textContent = stale ? "ERROR" : "LIVE";
+        }
+      }
+      function renderTruth(data) {
+        const allRows = data.strategy_truth || [];
+        const rows = allRows.filter((item) => {
+          if (truthView === "active") return Boolean(item.enabled) && item.execution_tier === "executable_paper" && !item.parent_strategy_id;
+          if (truthView === "archive") return !item.enabled || item.execution_tier !== "executable_paper";
+          return true;
+        });
+        setHTML("strategy-truth-table", table(
+          ["Strategy", "Tier", "Status", "Closed", "Win", "PnL", "Max DD", "95% EV", "Gate"],
+          rows.map((item) => {
+            const stats = item.timeframes?.[truthTimeframe] || {};
+            return [
+              esc(item.label || item.strategy_id || ""),
+              esc(item.execution_tier || ""),
+              esc(item.data_status === "not_loaded_fast" ? "not loaded in fast mode" : item.data_status || ""),
+              num(stats.closed || 0),
+              pct(stats.win_rate || 0),
+              `<span class="${posClass(stats.net_pnl_usdc)}">${money(stats.net_pnl_usdc || 0)}</span>`,
+              money(stats.max_drawdown_usdc || 0),
+              money(stats.lower_95_trade_ev_usdc || 0),
+              `<span class="${badgeClass(Boolean(item.validation?.passed), false)}" title="${esc((item.validation?.reasons || []).join('; '))}">${esc(item.validation?.status || "blocked")}</span>`,
+            ];
+          })
+        ));
+        const basketChildren = allRows.filter((item) => item.parent_strategy_id === "promoted:directional_basket:v1");
+        setHTML("promoted-basket-detail", truthView === "archive" ? "" : `<details><summary><strong>Promoted basket variants (${num(basketChildren.length)})</strong> — fresh execution-realistic results</summary>${table(
+          ["Variant", "Status", "Closed", "Win", "PnL", "Gate"],
+          basketChildren.map((item) => {
+            const stats = item.timeframes?.[truthTimeframe] || {};
+            return [esc(item.label || ""), esc(item.data_status || ""), num(stats.closed || 0), pct(stats.win_rate || 0), `<span class="${posClass(stats.net_pnl_usdc)}">${money(stats.net_pnl_usdc || 0)}</span>`, esc(item.validation?.status || "blocked")];
+          })
+        )}</details>`);
+        const graph = data.related_market_graph || {};
+        const graphPanel = $("constraint-graph-panel");
+        if (graphPanel) graphPanel.style.display = truthView === "active" ? "none" : "block";
+        setHTML("constraint-graph-table", table(
+          ["Group", "Legs", "Cost", "Edge", "Capacity", "Execution"],
+          (graph.opportunities || []).map((item) => [
+            esc(item.group_id || ""),
+            num((item.legs || []).length),
+            px(item.total_cost || 0),
+            px(item.edge_per_share || 0),
+            money(item.max_notional_usdc || 0),
+            esc(item.requires_atomic_or_preowned_execution ? "atomic/pre-owned required" : "research"),
+          ])
+        ) + `<div class="activity-meta">${esc(graph.warning || "")}</div>`);
+      }
+      function renderCycle(data) {
+        const steps = ["Scan", "Detect", "Validate", "Size", "Fill", "Settle"];
+        const active = phaseIndex(data.status?.phase);
+        setHTML("ops-cycle", steps.map((step, idx) => `<div class="cycle-step ${idx === active ? "active" : ""}"><span>0${idx + 1}</span><br>${esc(step)}</div>`).join(""));
+      }
+      function renderCommand(data) {
+        const temporal = data.temporal?.summary || {};
+        const live = data.live_temporal?.summary || {};
+        const basket = promotedBasket(data);
+        const basketStats = basket.timeframes?.all || {};
+        setHTML("command-cards", cards([
+          { label: "Promoted Basket", value: basket.data_status === "no_observations" ? "collecting" : money(basketStats.net_pnl_usdc || 0) },
+          { label: "Basket Variants", value: num(basket.member_count || 0) },
+          { label: "Basket Closes", value: num(basketStats.closed || 0) },
+          { label: "Tracked", value: num(data.status?.tracked_markets_count || 0) },
+          { label: "Temporal Active", value: num(temporal.active_inventory_markets || 0) },
+          { label: "Open Quotes", value: num(temporal.quote_open || 0) },
+          { label: "Live Submitted", value: num(live.submitted_24h || 0) },
+          { label: "Capital Used", value: money(data.capital?.total_current_capital_usdc || 0) },
+          { label: "Last Cycle", value: esc(data.generated_at_ct || "-") },
+        ]));
+        const styles = data.temporal?.quote_style_breakdown || [];
+        setHTML("style-table", table(["Style", "Quotes", "Filled", "Open", "Fill", "Avg Edge", "Fill P", "EV"], styles.map((item) => [
+          esc(item.quote_style || "-"),
+          num(item.quotes || 0),
+          num(item.filled || 0),
+          num(item.open || 0),
+          pct(n(item.filled || 0) / Math.max(n(item.quotes || 0), 1)),
+          px(item.avg_edge || 0),
+          n(item.avg_fill_probability || 0).toFixed(3),
+          money(item.expected_value_usdc || 0),
+        ])));
+        renderHeatmap(data.markets?.items || []);
+        drawScatter(data.temporal?.recent_quotes || []);
+      }
+      function renderHeatmap(items) {
+        const groups = assetAggregates(items).slice(0, 10);
+        const maxDepth = Math.max(...groups.map((group) => group.depth), 1);
+        setHTML("asset-heatmap", `<div class="heatmap">${groups.map((group) => `<div class="heat-row"><strong>${esc(group.asset)}</strong><div class="heat-bar"><div class="heat-fill" style="width:${Math.max(3, 100 * group.depth / maxDepth).toFixed(1)}%"></div></div><span>${num(group.count)}</span></div>`).join("") || "No market cache"}</div>`);
+      }
+      function renderTemporal(data) {
+        const temporal = data.temporal?.summary || {};
+        setHTML("temporal-cards", cards([
+          { label: "Equity", value: money(temporal.equity_usdc || 0) },
+          { label: "Realized", value: money(temporal.realized_pnl_usdc || 0), className: posClass(temporal.realized_pnl_usdc) },
+          { label: "Marked", value: money(temporal.marked_pnl_usdc || 0), className: posClass(temporal.marked_pnl_usdc) },
+          { label: "Locked Pairs", value: n(temporal.locked_pair_shares || 0).toFixed(4) },
+          { label: "Pair Cost", value: n(temporal.average_pair_cost || 0).toFixed(4) },
+          { label: "Unpaired Exposure", value: money(temporal.unpaired_exposure_usdc || 0) },
+          { label: "Adverse Loss", value: money(temporal.adverse_selection_loss_usdc || 0), className: "neg" },
+          { label: "Max DD", value: money(temporal.max_drawdown || 0), className: "neg" },
+          { label: "Worst Exit", value: esc(temporal.worst_exit_reason || "-") },
+          { label: "Worst Exit PnL", value: money(temporal.worst_exit_reason_pnl_usdc || 0), className: "neg" },
+        ]));
+        setHTML("temporal-markets", table(["Updated", "Market", "Asset", "State", "YES", "NO", "Pair", "Realized"], (data.temporal?.markets || []).map((item) => [
+          esc(shortTs(item.updated_ts)),
+          esc(item.market_id || ""),
+          esc(item.asset || ""),
+          esc(item.state || ""),
+          n(item.yes_shares || 0).toFixed(3),
+          n(item.no_shares || 0).toFixed(3),
+          n(item.locked_pair_cost || 0).toFixed(4),
+          money(item.realized_pnl_usdc || 0),
+        ])));
+        setHTML("temporal-quotes", table(["Created", "Market", "Style", "Side", "Px", "Size", "Status", "Edge", "Fill P", "EV"], (data.temporal?.recent_quotes || []).map((item) => [
+          esc(shortTs(item.ts_created)),
+          esc(item.market_id || ""),
+          esc(item.quote_style || ""),
+          esc(item.side || ""),
+          px(item.price || 0),
+          n(item.size || 0).toFixed(3),
+          esc(item.status || ""),
+          px(item.edge || 0),
+          n(item.fill_probability || 0).toFixed(3),
+          money(item.expected_value_usdc || 0),
+        ])));
+      }
+      function renderLive(data) {
+        const live = data.live_temporal?.summary || {};
+        setHTML("live-cards", cards([
+          { label: "Pilot Mode", value: esc(live.pilot_mode || "dry_run") },
+          { label: "Armed", value: esc(Boolean(live.armed_for_live_orders)) },
+          { label: "Open Orders", value: num(live.open_orders || 0) },
+          { label: "Open Notional", value: money(live.open_notional_usdc || 0) },
+          { label: "Dry-Run 24h", value: num(live.dry_run_24h || 0) },
+          { label: "Submitted 24h", value: num(live.submitted_24h || 0) },
+          { label: "Blocked 24h", value: num(live.blocked_24h || 0) },
+          { label: "Cancel-All", value: esc(Boolean(live.last_heartbeat_cancel_all_ok)) },
+          { label: "Reward Scoring", value: num(live.reward_scoring_orders || 0) },
+          { label: "Actual Rebates", value: money(live.actual_rebate_pnl_usdc || 0) },
+        ]));
+        setHTML("live-orders", table(["Created", "Market", "Side", "Px", "Size", "Status", "Decision", "Edge", "Reason"], (data.live_temporal?.recent_orders || []).map((item) => [
+          esc(shortTs(item.ts_created)),
+          esc(item.market_id || ""),
+          esc(item.side || ""),
+          px(item.price || 0),
+          n(item.size || 0).toFixed(3),
+          esc(item.status || ""),
+          esc(item.decision || ""),
+          px(item.edge || 0),
+          esc(item.reason || item.error || ""),
+        ])));
+      }
+      function renderMarkets(data) {
+        const items = data.markets?.items || [];
+        setHTML("market-cards", cards([
+          { label: "Cache Rows", value: num(data.markets?.count || items.length) },
+          { label: "Cache Source", value: esc(data.markets?.source || "-") },
+          { label: "Binance Rows", value: num(data.binance?.count || 0) },
+          { label: "Updated", value: esc(shortTs(data.markets?.updated_at)) },
+        ]));
+        setHTML("market-table", table(["Question", "Asset", "Hours", "Bid", "Ask", "Mid", "Depth", "Seen"], items.slice(0, 30).map((item) => [
+          esc(item.question || item.title || ""),
+          esc(item.asset || ""),
+          n(item.hours_to_expiry || 0).toFixed(2),
+          px(item.best_bid || item.bid || 0),
+          px(item.best_ask || item.ask || 0),
+          px(item.midpoint || item.mid || 0),
+          money(item.min_depth_usdc || item.depth_usdc || 0),
+          esc(shortTs(item.seen_at || item.updated_at)),
+        ])));
+      }
+      function renderActivity(data) {
+        const events = data.temporal?.recent_events || [];
+        const orders = (data.live_temporal?.recent_orders || []).slice(0, 6).map((item) => ({ ...item, event_type: `LIVE_${item.status || item.decision || "ORDER"}`, ts: item.ts_created }));
+        const feed = [...events, ...orders].slice(0, 32);
+        setHTML("activity-feed", feed.map((item) => {
+          const type = String(item.event_type || item.status || "EVENT").toLowerCase();
+          const title = esc(item.event_type || item.status || "EVENT");
+          const when = esc(shortTs(item.ts || item.ts_created));
+          const meta = `${esc(item.market_id || "")} ${esc(item.side || "")} ${item.price ? `@ ${px(item.price)}` : ""} ${item.pnl_usdc ? ` / ${money(item.pnl_usdc)}` : ""}`;
+          const reason = esc(item.reason || item.cancel_reason || item.decision || "");
+          return `<div class="activity-item ${type}"><div class="activity-title"><span>${title}</span><span>${when}</span></div><div class="activity-meta">${meta}<br>${reason}</div></div>`;
+        }).join("") || `<div class="activity-meta">No recent lifecycle events</div>`);
+      }
+      function shortTs(raw) {
+        if (!raw) return "-";
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) return String(raw).slice(0, 19);
+        return parsed.toLocaleTimeString([], { hour12: false });
+      }
+      function drawAgentGraph(data) {
+        const canvas = $("agent-canvas");
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * scale));
+        canvas.height = Math.max(1, Math.floor(rect.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        const w = rect.width, h = rect.height;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = "#fbfdff";
+        ctx.fillRect(0, 0, w, h);
+        const summary = data.temporal?.summary || {};
+        const live = data.live_temporal?.summary || {};
+        const counts = data.counts || {};
+        const stages = [
+          { name: "Books", value: n(counts.polymarket_books || 0), valueLabel: num(counts.polymarket_books || 0), detail: "book snapshots" },
+          { name: "Signals", value: n(counts.signals || 0), valueLabel: num(counts.signals || 0), detail: "modeled signals" },
+          { name: "Quotes", value: n(summary.quotes_60m || counts.temporal_inventory_quotes || 0), valueLabel: num(summary.quotes_60m || counts.temporal_inventory_quotes || 0), detail: "paper maker quotes" },
+          { name: "Fills", value: n(summary.quote_fills_60m || 0), valueLabel: num(summary.quote_fills_60m || 0), detail: "simulated fills" },
+          { name: "PnL", value: Math.max(0, Math.abs(n(summary.realized_pnl_24h_usdc || summary.marked_pnl_usdc || 0))), valueLabel: money(summary.marked_pnl_usdc || 0), detail: "marked PnL" },
+        ];
+        const maxFlow = Math.max(...stages.slice(0, 4).map((stage) => stage.value), 1);
+        const y = Math.max(96, h * .48);
+        const nodeW = Math.max(80, Math.min(122, w * .16));
+        const nodeH = 62;
+        const xs = stages.map((_, idx) => 22 + idx * ((w - 44 - nodeW) / Math.max(stages.length - 1, 1)));
+        const flowWidth = (value) => Math.max(4, Math.min(30, 4 + 26 * n(value) / maxFlow));
+        const roundedRect = (x, y, width, height, radius) => {
+          const r = Math.min(radius, width / 2, height / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.lineTo(x + width - r, y);
+          ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+          ctx.lineTo(x + width, y + height - r);
+          ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+          ctx.lineTo(x + r, y + height);
+          ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+          ctx.lineTo(x, y + r);
+          ctx.quadraticCurveTo(x, y, x + r, y);
+          ctx.closePath();
+        };
+        const drawConnector = (fromIdx, toIdx, value, color) => {
+          const x1 = xs[fromIdx] + nodeW;
+          const x2 = xs[toIdx];
+          const width = flowWidth(value);
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = width;
+          ctx.lineCap = "round";
+          ctx.globalAlpha = .32;
+          ctx.beginPath();
+          ctx.moveTo(x1, y);
+          ctx.bezierCurveTo(x1 + (x2 - x1) * .45, y, x1 + (x2 - x1) * .55, y, x2, y);
+          ctx.stroke();
+          ctx.restore();
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.2;
+          ctx.globalAlpha = .75;
+          ctx.beginPath();
+          ctx.moveTo(x1, y);
+          ctx.bezierCurveTo(x1 + (x2 - x1) * .45, y, x1 + (x2 - x1) * .55, y, x2, y);
+          ctx.stroke();
+          ctx.restore();
+        };
+        drawConnector(0, 1, Math.min(stages[0].value, stages[1].value), "#0891b2");
+        drawConnector(1, 2, Math.min(stages[1].value, stages[2].value), "#0891b2");
+        drawConnector(2, 3, Math.min(stages[2].value, stages[3].value), "#10b981");
+        drawConnector(3, 4, stages[3].value || stages[4].value, n(summary.marked_pnl_usdc || 0) >= 0 ? "#10b981" : "#dc2626");
+        const cancelled = n(summary.quote_cancelled || 0);
+        const liveBlocked = n(live.blocked_24h || 0);
+        const branchY = Math.min(h - 56, y + 70);
+        if (cancelled > 0 || liveBlocked > 0) {
+          const branchX = xs[2] + nodeW * .5;
+          ctx.save();
+          ctx.strokeStyle = "#d97706";
+          ctx.lineWidth = Math.min(18, Math.max(3, flowWidth(cancelled + liveBlocked) * .65));
+          ctx.lineCap = "round";
+          ctx.globalAlpha = .25;
+          ctx.beginPath();
+          ctx.moveTo(branchX, y + nodeH * .5);
+          ctx.bezierCurveTo(branchX + 18, branchY - 42, xs[3] - 22, branchY - 18, xs[3], branchY);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = "#d97706";
+          ctx.beginPath();
+          ctx.arc(xs[3], branchY, 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#475569";
+          ctx.font = "700 10px ui-sans-serif, system-ui";
+          ctx.textAlign = "center";
+          ctx.fillText(`${num(cancelled + liveBlocked)} stopped`, xs[3], branchY + 22);
+        }
+        stages.forEach((stage, idx) => {
+          const x = xs[idx];
+          const top = y - nodeH / 2;
+          const fill = idx === 4 ? (n(summary.marked_pnl_usdc || 0) >= 0 ? "#ecfdf5" : "#fef2f2") : "#ffffff";
+          const stroke = idx === 3 ? "#10b981" : (idx === 4 ? (n(summary.marked_pnl_usdc || 0) >= 0 ? "#10b981" : "#dc2626") : "#cbd5e1");
+          roundedRect(x, top, nodeW, nodeH, 8);
+          ctx.fillStyle = fill;
+          ctx.fill();
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 1.4;
+          ctx.stroke();
+          ctx.fillStyle = idx === 4 ? (n(summary.marked_pnl_usdc || 0) >= 0 ? "#079669" : "#dc2626") : "#0f172a";
+          ctx.font = "850 18px ui-sans-serif, system-ui";
+          ctx.textAlign = "center";
+          ctx.fillText(stage.valueLabel, x + nodeW / 2, top + 26);
+          ctx.fillStyle = "#64748b";
+          ctx.font = "750 10px ui-sans-serif, system-ui";
+          ctx.fillText(stage.detail, x + nodeW / 2, top + 45);
+          ctx.fillStyle = "#475569";
+          ctx.font = "850 12px ui-sans-serif, system-ui";
+          ctx.fillText(stage.name, x + nodeW / 2, h - 14);
+        });
+        ctx.fillStyle = "#64748b";
+        ctx.font = "700 11px ui-sans-serif, system-ui";
+        ctx.textAlign = "left";
+        ctx.fillText("60m stage flow; PnL node uses current temporal marked PnL", 18, 22);
+      }
+      function drawScatter(quotes) {
+        const canvas = $("scatter-canvas");
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * scale));
+        canvas.height = Math.max(1, Math.floor(rect.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        const w = rect.width, h = rect.height;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = "#fbfdff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.lineWidth = 1;
+        for (let i = 1; i < 5; i += 1) {
+          const x = (w / 5) * i;
+          const y = (h / 5) * i;
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        }
+        const maxEdge = Math.max(...(quotes || []).map((q) => Math.abs(n(q.edge || 0))), .01);
+        (quotes || []).forEach((quote, idx) => {
+          const x = 22 + (Math.abs(n(quote.edge || 0)) / maxEdge) * (w - 44);
+          const y = h - 22 - n(quote.fill_probability || 0) * (h - 44);
+          const status = String(quote.status || "").toUpperCase();
+          ctx.fillStyle = status === "FILLED" ? "#10b981" : (status === "OPEN" ? "#0891b2" : "#d97706");
+          ctx.beginPath();
+          ctx.arc(x, y, 4 + (idx % 3), 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.fillStyle = "#64748b";
+        ctx.font = "700 11px ui-sans-serif, system-ui";
+        ctx.fillText("edge ->", 12, h - 8);
+        ctx.save(); ctx.translate(10, h - 18); ctx.rotate(-Math.PI / 2); ctx.fillText("fill probability ->", 0, 0); ctx.restore();
+      }
+      function render(data) {
+        state = data || state;
+        renderTape(state);
+        renderHero(state);
+        renderCycle(state);
+        renderCommand(state);
+        renderTruth(state);
+        renderTemporal(state);
+        renderLive(state);
+        renderMarkets(state);
+        renderActivity(state);
+        drawAgentGraph(state);
+      }
+      async function refresh() {
+        if ($("ops-freeze")?.checked) return;
+        try {
+          setText("ops-refresh-status", "refreshing");
+          const response = await fetch(`/api/state?mode=${encodeURIComponent(mode)}`, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          render(data);
+          setText("ops-refresh-status", `updated ${data.generated_at_ct || ""}`);
+        } catch (error) {
+          setText("ops-refresh-status", `refresh failed: ${error.message || error}`);
+        }
+      }
+      document.querySelectorAll(".ops-tab").forEach((button) => {
+        if (button.dataset.truthPeriod || button.dataset.truthView) return;
+        button.addEventListener("click", () => {
+          activeTab = button.dataset.tab || "command";
+          document.querySelectorAll("[data-tab]").forEach((tab) => tab.setAttribute("aria-selected", String(tab === button)));
+          document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === activeTab));
+          drawAgentGraph(state);
+          drawScatter(state.temporal?.recent_quotes || []);
+        });
+      });
+      document.querySelectorAll("[data-truth-period]").forEach((button) => {
+        button.addEventListener("click", () => {
+          truthTimeframe = button.dataset.truthPeriod || "all";
+          document.querySelectorAll("[data-truth-period]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderTruth(state);
+        });
+      });
+      document.querySelectorAll("[data-truth-view]").forEach((button) => {
+        button.addEventListener("click", () => {
+          truthView = button.dataset.truthView || "active";
+          document.querySelectorAll("[data-truth-view]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+          renderTruth(state);
+        });
+      });
+      window.addEventListener("resize", () => {
+        drawAgentGraph(state);
+        drawScatter(state.temporal?.recent_quotes || []);
+      });
+      render(initial);
+      setInterval(() => setText("ops-clock", new Date().toLocaleTimeString([], { hour12: false })), 1000);
+      setInterval(refresh, 3000);
+    })();
+  </script>
+"""
+    return template.replace("__INITIAL_STATE__", payload_json)
 
 
 def _render_shadow_variant_table(items: list[dict[str, Any]]) -> str:
@@ -580,8 +1717,14 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         settings,
         cache_items=polymarket_cache.get("items", []) if isinstance(polymarket_cache.get("items"), list) else [],
     )
+    strategy_truth = build_strategy_truth_rows(settings)
+    related_market_graph = build_related_market_constraint_graph(
+        settings,
+        markets_payload=markets,
+        polymarket_cache=polymarket_cache,
+    )
     promoted_variant_stats = (
-        {"summary": {}, "variants": []}
+        {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}, "variants": []}
         if fast
         else latency_bot_promoted_variant_performance_stats(
             settings,
@@ -608,8 +1751,8 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     live_strategy_equity_curves = [] if fast else latency_bot_live_strategy_equity_curves(settings)
     shadow_stats = {} if fast else latency_bot_shadow_performance_stats(settings)
     complete_set_arb_stats = {} if fast else latency_bot_complete_set_arb_stats(settings)
-    cex_latency_paper = {} if fast else latency_bot_cex_latency_paper_stats(settings)
-    btc_fair_value_paper = {} if fast else latency_bot_btc_fair_value_paper_stats(settings)
+    cex_latency_paper = {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}} if fast else latency_bot_cex_latency_paper_stats(settings)
+    btc_fair_value_paper = {"data_status": "not_loaded_fast", "summary": {"data_status": "not_loaded_fast"}} if fast else latency_bot_btc_fair_value_paper_stats(settings)
     temporal_inventory_maker_paper = latency_bot_temporal_inventory_maker_paper_stats(settings)
     live_temporal_inventory_maker = latency_bot_live_temporal_inventory_maker_stats(settings)
     late_resolution_capture_paper = latency_bot_late_resolution_capture_paper_stats(settings)
@@ -649,6 +1792,16 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
         "open_positions": open_positions,
         "open_shadow_positions": open_shadow_positions,
         "portfolio": portfolio,
+        "strategy_truth": strategy_truth,
+        "related_market_graph": related_market_graph,
+        "data_availability": {
+            "promoted_variant_stats": "not_loaded_fast" if fast else "loaded",
+            "cex_latency_paper": "not_loaded_fast" if fast else "loaded",
+            "btc_fair_value_paper": "not_loaded_fast" if fast else "loaded",
+            "shadow_research": "not_loaded_fast" if fast else "loaded",
+            "complete_set_research": "not_loaded_fast" if fast else "loaded",
+            "wallet_reconciliation": "not_loaded_fast" if fast else "loaded",
+        },
         "promoted_variant_stats": promoted_variant_stats,
         "signal_stats": signal_stats,
         "enabled_signal_stats": enabled_signal_stats,
@@ -682,7 +1835,36 @@ def build_latency_bot_dashboard_state(settings: LatencyBotSettings, *, fast: boo
     return state
 
 
+def _render_latency_bot_fast_html(state: dict[str, Any]) -> str:
+    status = state.get("status", {}) if isinstance(state.get("status"), dict) else {}
+    page_generated_at = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S CT")
+    last_cycle_completed = _fmt_ts(status.get("last_cycle_completed_at"))
+    cockpit = _render_interactive_cockpit(state)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polymarket Latency Ops</title>
+  <style>
+    body {{ margin: 0; background: #eef3f8; color: #0f172a; font-family: ui-sans-serif, system-ui, sans-serif; }}
+    .fast-header {{ max-width: 1440px; margin: 16px auto 0; padding: 0 16px; display: flex; gap: 12px; justify-content: space-between; align-items: center; color: #64748b; font-size: 12px; }}
+    .fast-header a {{ color: #0f766e; font-weight: 800; text-decoration: none; }}
+  </style>
+</head>
+<body>
+  <div class="fast-header">
+    <span>Updated {html.escape(page_generated_at)} · last cycle {html.escape(last_cycle_completed)}</span>
+    <a href="?mode=full">Open archived research and legacy bots</a>
+  </div>
+  {cockpit}
+</body>
+</html>"""
+
+
 def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
+    if bool(state.get("fast_mode")):
+        return _render_latency_bot_fast_html(state)
     page_generated_at = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S CT")
     fast_mode = bool(state.get("fast_mode"))
     served_from_cache = bool(state.get("served_from_cache"))
@@ -793,12 +1975,12 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Open Positions", html.escape(_fmt_num(status.get("open_positions_count", 0)))],
         ["Capital Currently In Use", html.escape(_fmt_money(capital_usage.get("total_current_capital_usdc", 0.0)))],
         ["Current Capital / Bankroll", html.escape(f"{100.0 * float(capital_usage.get('total_current_bankroll_fraction', 0.0)):.1f}%")],
-        ["Realized PnL", html.escape(_fmt_money(portfolio.get("realized_pnl_usdc", status.get("realized_pnl_usdc", 0.0))))],
-        ["Dollars / Day Realized", html.escape(_fmt_money(portfolio.get("realized_usdc_per_day", 0.0)))],
-        ["Projected Monthly Revenue", html.escape(_fmt_money(portfolio.get("projected_monthly_revenue_usdc", 0.0)))],
-        ["Projected Yearly Revenue", html.escape(_fmt_money(portfolio.get("projected_yearly_revenue_usdc", 0.0)))],
-        ["Unrealized PnL", html.escape(_fmt_money(portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0))))],
-        ["Equity", html.escape(_fmt_money(portfolio.get("equity_usdc", bankroll_usdc)))],
+        ["Legacy Shared Paper Realized PnL", html.escape(_fmt_money(portfolio.get("realized_pnl_usdc", status.get("realized_pnl_usdc", 0.0))))],
+        ["Legacy Shared 24h PnL", html.escape(_fmt_money(portfolio.get("realized_usdc_per_day", 0.0)))],
+        ["Legacy 24h x 30 Projection", html.escape(_fmt_money(portfolio.get("projected_monthly_revenue_usdc", 0.0)))],
+        ["Legacy 24h x 365 Projection", html.escape(_fmt_money(portfolio.get("projected_yearly_revenue_usdc", 0.0)))],
+        ["Legacy Shared Unrealized PnL", html.escape(_fmt_money(portfolio.get("unrealized_pnl_usdc", status.get("unrealized_pnl_usdc", 0.0))))],
+        ["Legacy Shared Paper Equity", html.escape(_fmt_money(portfolio.get("equity_usdc", bankroll_usdc)))],
         ["CEX Paper Model", html.escape(str(cex_latency_summary.get("model") or "-"))],
         ["CEX Paper Equity", html.escape(_fmt_money(cex_latency_summary.get("equity_usdc", 0.0)))],
         ["CEX Paper Net PnL", html.escape(_fmt_money(cex_latency_summary.get("net_pnl", 0.0)))],
@@ -1030,6 +2212,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(promoted_execution_result.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(promoted_execution_result.get("closed_positions_count", 0)))],
     ]
+    if promoted_summary.get("data_status") == "not_loaded_fast":
+        promoted_summary_rows = [["Data", "Not loaded in fast mode; use the Strategy Truth tab or ?mode=full"]]
     promoted_variant_table = _table(
         [
             "Variant",
@@ -1106,13 +2290,15 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Expired Inventory Cost", html.escape(_fmt_money(temporal_inventory_summary.get("expired_inventory_cost_usdc", 0.0)))],
         ["Quote Fill Rate", html.escape(f"{100.0 * float(temporal_inventory_summary.get('quote_fill_rate', 0.0)):.1f}%")],
         ["Quotes Filled / Total", html.escape(f"{_fmt_num(temporal_inventory_summary.get('quote_filled', 0))} / {_fmt_num(temporal_inventory_summary.get('quote_count', 0))}")],
+        ["Quotes Open / Cancelled", html.escape(f"{_fmt_num(temporal_inventory_summary.get('quote_open', 0))} / {_fmt_num(temporal_inventory_summary.get('quote_cancelled', 0))}")],
         ["Adverse-Selection Loss", html.escape(_fmt_money(temporal_inventory_summary.get("adverse_selection_loss_usdc", 0.0)))],
         ["Win Rate", html.escape(f"{100.0 * float(temporal_inventory_summary.get('win_rate', 0.0)):.1f}%")],
         ["Max Drawdown", html.escape(_fmt_money(temporal_inventory_summary.get("max_drawdown", 0.0)))],
         ["24h Realized PnL", html.escape(_fmt_money(temporal_inventory_summary.get("realized_pnl_24h_usdc", 0.0)))],
         ["Projected Monthly Revenue", html.escape(_fmt_money(temporal_inventory_summary.get("projected_monthly_revenue_usdc", 0.0)))],
         ["Projected Yearly Revenue", html.escape(_fmt_money(temporal_inventory_summary.get("projected_yearly_revenue_usdc", 0.0)))],
-        ["Open Markets", html.escape(_fmt_num(temporal_inventory_summary.get("open_markets", 0)))],
+        ["Active Inventory Markets", html.escape(_fmt_num(temporal_inventory_summary.get("active_inventory_markets", 0)))],
+        ["Tracked Lifecycle Markets", html.escape(_fmt_num(temporal_inventory_summary.get("tracked_markets", temporal_inventory_summary.get("open_markets", 0))))],
         ["Closed Markets", html.escape(_fmt_num(temporal_inventory_summary.get("closed_markets", 0)))],
         ["Base Order", html.escape(_fmt_money(temporal_inventory_summary.get("base_order_usdc", 0.0)))],
         ["Max Market Exposure", html.escape(_fmt_money(temporal_inventory_summary.get("max_market_exposure_usdc", 0.0)))],
@@ -1120,6 +2306,10 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Min Net Edge", html.escape(f"{float(temporal_inventory_summary.get('min_net_edge', 0.0)):.4f}")],
         ["Max Pair Cost", html.escape(f"{float(temporal_inventory_summary.get('max_pair_cost', 0.0)):.4f}")],
         ["Quote TTL", html.escape(f"{_fmt_num(temporal_inventory_summary.get('quote_ttl_seconds', 0))}s")],
+        ["High-Edge / Hedge TTL", html.escape(f"{_fmt_num(temporal_inventory_summary.get('high_edge_ttl_seconds', 0))}s / {_fmt_num(temporal_inventory_summary.get('hedge_ttl_seconds', 0))}s")],
+        ["Aggressive Edge Floors", html.escape(f"mid {float(temporal_inventory_summary.get('mid_aggressive_min_edge', 0.0)):.4f} | touch {float(temporal_inventory_summary.get('near_touch_min_edge', 0.0)):.4f}")],
+        ["Fill / EV Floors", html.escape(f"p {float(temporal_inventory_summary.get('min_fill_probability', 0.0)):.3f} | EV {_fmt_money(temporal_inventory_summary.get('min_expected_value_usdc', 0.0))}")],
+        ["Unpaired Timeout", html.escape(f"{_fmt_num(temporal_inventory_summary.get('unpaired_timeout_seconds', 0))}s")],
         ["Force Exit", html.escape(f"{_fmt_num(temporal_inventory_summary.get('force_exit_seconds', 0))}s")],
         ["Daily Loss Limit", html.escape(_fmt_money(temporal_inventory_summary.get("daily_loss_limit_usdc", 0.0)))],
         ["Last Cycle Quotes Opened", html.escape(_fmt_num(temporal_inventory_execution.get("opened_quotes_count", 0)))],
@@ -1164,17 +2354,37 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
             for item in temporal_inventory_maker_paper.get("recent_events", [])
         ],
     )
+    temporal_inventory_style_table = _table(
+        ["Style", "Quotes", "Filled", "Open", "Fill Rate", "Avg Edge", "Avg Fill P", "EV", "Adverse Loss"],
+        [
+            [
+                html.escape(str(item.get("quote_style", ""))),
+                html.escape(_fmt_num(item.get("quotes", 0))),
+                html.escape(_fmt_num(item.get("filled", 0))),
+                html.escape(_fmt_num(item.get("open", 0))),
+                html.escape(f"{100.0 * (float(item.get('filled') or 0.0) / max(float(item.get('quotes') or 0.0), 1.0)):.1f}%"),
+                html.escape(f"{float(item.get('avg_edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('avg_fill_probability') or 0.0):.3f}"),
+                html.escape(_fmt_money(item.get("expected_value_usdc", 0.0))),
+                html.escape(_fmt_money(item.get("adverse_selection_loss_usdc", 0.0))),
+            ]
+            for item in temporal_inventory_maker_paper.get("quote_style_breakdown", [])
+        ],
+    )
     temporal_inventory_quote_table = _table(
-        ["Created (CT)", "Market", "Side", "Price", "Size", "Status", "Edge", "Fill", "Adverse Loss", "Reason"],
+        ["Created (CT)", "Market", "Style", "Side", "Price", "Size", "Status", "Edge", "Fill P", "EV", "Fill", "Adverse Loss", "Reason"],
         [
             [
                 html.escape(_fmt_ts(item.get("ts_created"))),
                 html.escape(str(item.get("market_id", ""))),
+                html.escape(str(item.get("quote_style", ""))),
                 html.escape(str(item.get("side", ""))),
                 html.escape(f"{float(item.get('price', 0.0)):.4f}"),
                 html.escape(f"{float(item.get('size', 0.0)):.4f}"),
                 html.escape(str(item.get("status", ""))),
                 html.escape(f"{float(item.get('edge') or 0.0):.4f}"),
+                html.escape(f"{float(item.get('fill_probability') or 0.0):.3f}"),
+                html.escape(_fmt_money(item.get("expected_value_usdc", 0.0))),
                 html.escape(f"{float(item.get('fill_price') or 0.0):.4f} / {float(item.get('fill_size') or 0.0):.4f}"),
                 html.escape(_fmt_money(item.get("adverse_selection_loss_usdc", 0.0))),
                 html.escape(str(item.get("cancel_reason") or item.get("reason") or "")),
@@ -1272,6 +2482,9 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Min Official Confidence", html.escape(f"{float(late_resolution_summary.get('min_official_confidence', 0.0)):.4f}")],
         ["Min Boundary Distance", html.escape(f"{float(late_resolution_summary.get('min_boundary_distance_bps', 0.0)):.1f} bps")],
         ["Min Edge", html.escape(f"{float(late_resolution_summary.get('min_edge', 0.0)):.4f}")],
+        ["Min Entry Depth", html.escape(_fmt_money(late_resolution_summary.get("min_depth_usdc", 0.0)))],
+        ["Min Exit Bid", html.escape(f"{float(late_resolution_summary.get('min_exit_bid', 0.0)):.4f}")],
+        ["Max Book Age", html.escape(f"{float(late_resolution_summary.get('max_book_age_ms', 0.0)):.0f} ms")],
         ["Daily Loss Limit", html.escape(_fmt_money(late_resolution_summary.get("daily_loss_limit_usdc", 0.0)))],
         ["Last Cycle Opened / Closed", html.escape(f"{_fmt_num(late_resolution_execution.get('opened_positions_count', 0))} / {_fmt_num(late_resolution_execution.get('closed_positions_count', 0))}")],
         ["Last Cycle Entry Blocks", html.escape(_fmt_num(late_resolution_execution.get("entry_blocks_count", 0)))],
@@ -1386,6 +2599,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(cex_latency_execution.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(cex_latency_execution.get("closed_positions_count", 0)))],
     ]
+    if cex_latency_summary.get("data_status") == "not_loaded_fast":
+        cex_latency_summary_rows = [["Data", "Not loaded in fast mode; canonical historical PnL remains in Strategy Truth"]]
     cex_latency_signal_table = _table(
         ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
         [
@@ -1492,6 +2707,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Last Cycle Opens", html.escape(_fmt_num(btc_fair_value_execution.get("opened_positions_count", 0)))],
         ["Last Cycle Closes", html.escape(_fmt_num(btc_fair_value_execution.get("closed_positions_count", 0)))],
     ]
+    if btc_fair_value_summary.get("data_status") == "not_loaded_fast":
+        btc_fair_value_summary_rows = [["Data", "Not loaded in fast mode; canonical historical PnL remains in Strategy Truth"]]
     btc_fair_value_signal_table = _table(
         ["Time (CT)", "Market", "Asset", "Side", "Signal", "Edge", "Fair YES", "Fair NO", "Entry", "Depth", "Book Age", "Secs Left", "Eligible", "Reason"],
         [
@@ -2876,12 +4093,12 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
             for item in shadow_stats.get("edge_band_breakdown", [])
         ],
     )
+    interactive_cockpit_html = _render_interactive_cockpit(state)
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="10">
   <title>Latency Bot Dashboard</title>
   <style>
     body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #111827; background: #f8fafc; }}
@@ -2919,6 +4136,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
   <div class="meta">
     {"Live-fast mode skips heavy research panes so real-money pilot status refreshes quickly. Open <a href='?mode=full'>full research mode</a> only when you need the historical simulations." if fast_mode else "Full research mode recomputes historical simulations and can take over a minute. Open <a href='?mode=fast'>live-fast mode</a> for monitoring."}
   </div>
+  {interactive_cockpit_html}
   <div class="grid">
     <div class="panel"><h2>Status</h2>{_table(["Metric", "Value"], rows)}</div>
     <div class="panel"><h2>Capital Usage</h2>{_table(["Metric", "Value"], capital_usage_rows)}</div>
@@ -2952,6 +4170,8 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     <h3>Recent Lifecycle Events</h3>
     <div class="sub">Expected labels include SEED, MAKER_QUOTE, MAKER_FILL, HEDGE, LOCKED_PAIR, ROTATE, SELL, EXPIRE, and RESOLVE. CANCEL is shown when a stale simulated maker quote is pulled.</div>
     {temporal_inventory_event_table}
+    <h3>Quote Style Diagnostics</h3>
+    {temporal_inventory_style_table}
     <h3>Recent Simulated Maker Quotes</h3>
     {temporal_inventory_quote_table}
   </div>
@@ -3354,9 +4574,19 @@ def serve_latency_bot_dashboard(settings: LatencyBotSettings, host: str, port: i
             env_fast = str(os.getenv("LATENCY_BOT_DASHBOARD_FAST", "1")).strip().lower() not in {"0", "false", "no"}
             fast = requested_mode != "full" if requested_mode else env_fast
             state = build_latency_bot_dashboard_state(settings, fast=fast)
+            if parsed.path.rstrip("/") == "/api/state":
+                payload = _serialize_interactive_dashboard_payload(state).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             body = render_latency_bot_dashboard_html(state).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
