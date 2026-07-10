@@ -330,7 +330,8 @@ _SCHEMA = (
         last_signal_side TEXT,
         last_signal_edge REAL,
         last_quote_id TEXT,
-        mode TEXT NOT NULL DEFAULT 'temporal_inventory_maker_paper'
+        mode TEXT NOT NULL DEFAULT 'temporal_inventory_maker_paper',
+        execution_model TEXT NOT NULL DEFAULT 'legacy'
     )
     """,
     """
@@ -407,6 +408,27 @@ _SCHEMA = (
         open_orders INTEGER NOT NULL,
         cancel_all_ok INTEGER NOT NULL,
         reason TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS maker_rebate_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        strategy_id TEXT NOT NULL,
+        market_id TEXT,
+        order_id TEXT,
+        scoring_status TEXT NOT NULL DEFAULT 'unknown',
+        rebate_usdc REAL NOT NULL DEFAULT 0.0,
+        source TEXT NOT NULL,
+        metadata TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy_epochs (
+        strategy_id TEXT PRIMARY KEY,
+        execution_model TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        notes TEXT
     )
     """,
     """
@@ -691,6 +713,7 @@ _SIGNAL_FEATURE_COLUMNS = {
 
 
 _POSITION_ENTRY_FEATURE_COLUMNS = {
+    "execution_model": "TEXT",
     "entry_signal_type": "TEXT",
     "entry_edge": "REAL",
     "entry_fair_yes": "REAL",
@@ -1168,9 +1191,17 @@ def init_latency_bot_db(settings: LatencyBotSettings) -> dict[str, Any]:
         _ensure_columns(conn, "cex_latency_paper_signals", {"order_price": "REAL"})
         _ensure_columns(conn, "polymarket_books", _POLYMARKET_BOOK_COLUMNS)
         _ensure_columns(conn, "temporal_inventory_quotes", _TEMPORAL_INVENTORY_QUOTE_COLUMNS)
+        _ensure_columns(conn, "temporal_inventory_markets", {"execution_model": "TEXT NOT NULL DEFAULT 'legacy'"})
         _ensure_columns(conn, "positions", _POSITION_ENTRY_FEATURE_COLUMNS)
         _ensure_columns(conn, "shadow_positions", _POSITION_ENTRY_FEATURE_COLUMNS)
         _ensure_columns(conn, "shadow_variant_positions", _POSITION_ENTRY_FEATURE_COLUMNS)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO strategy_epochs (strategy_id, execution_model, started_at, notes)
+            VALUES ('temporal_inventory_maker', 'queue_aware_passive_v1', ?, 'Passive-only, queue-aware fill model with inventory skew')
+            """,
+            (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),),
+        )
         if _should_run_legacy_backfills(conn, user_version):
             _backfill_signal_dimensions(conn, "signals")
             _backfill_signal_dimensions(conn, "shadow_signals")
@@ -1919,10 +1950,11 @@ def create_position(
             """
             INSERT INTO positions (
                 position_id, market_id, asset, side, entry_ts, entry_price, size, mode, status,
+                execution_model,
                 entry_signal_type, entry_edge, entry_fair_yes, entry_fair_no, entry_seconds_left,
                 entry_min_depth_usdc, entry_book_age_ms, entry_reference_price, entry_volatility,
                 entry_tenor_minutes, entry_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -1934,6 +1966,7 @@ def create_position(
                 size,
                 mode,
                 "open",
+                str((signal or {}).get("execution_model") or "legacy"),
                 str((signal or {}).get("signal_type") or ""),
                 float((signal or {}).get("edge") or 0.0),
                 float((signal or {}).get("fair_yes") or 0.0),
@@ -2414,6 +2447,7 @@ def upsert_temporal_inventory_market(
     last_signal_side: str = "",
     last_signal_edge: float = 0.0,
     last_quote_id: str = "",
+    execution_model: str = "queue_aware_passive_v1",
 ) -> dict[str, Any]:
     with connect_latency_bot_db(settings) as conn:
         conn.execute(
@@ -2422,8 +2456,9 @@ def upsert_temporal_inventory_market(
                 market_id, asset, tenor_minutes, first_seen_ts, updated_ts, state,
                 yes_shares, no_shares, yes_cost_usdc, no_cost_usdc, realized_pnl_usdc,
                 expired_inventory_cost_usdc, locked_pair_shares, locked_pair_cost,
-                locked_pair_pnl_usdc, last_signal_side, last_signal_edge, last_quote_id, mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                locked_pair_pnl_usdc, last_signal_side, last_signal_edge, last_quote_id, mode,
+                execution_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
                 asset = excluded.asset,
                 tenor_minutes = excluded.tenor_minutes,
@@ -2440,7 +2475,8 @@ def upsert_temporal_inventory_market(
                 locked_pair_pnl_usdc = excluded.locked_pair_pnl_usdc,
                 last_signal_side = excluded.last_signal_side,
                 last_signal_edge = excluded.last_signal_edge,
-                last_quote_id = excluded.last_quote_id
+                last_quote_id = excluded.last_quote_id,
+                execution_model = excluded.execution_model
             """,
             (
                 market_id,
@@ -2462,6 +2498,7 @@ def upsert_temporal_inventory_market(
                 round(float(last_signal_edge), 8),
                 str(last_quote_id or ""),
                 "temporal_inventory_maker_paper",
+                str(execution_model or "queue_aware_passive_v1"),
             ),
         )
         row = conn.execute("SELECT * FROM temporal_inventory_markets WHERE market_id = ?", (market_id,)).fetchone()
@@ -2749,6 +2786,41 @@ def record_live_temporal_inventory_maker_heartbeat(
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (ts, status, 1 if armed else 0, int(open_orders), 1 if cancel_all_ok else 0, reason),
+        )
+        conn.commit()
+
+
+def record_maker_rebate_event(
+    settings: LatencyBotSettings,
+    *,
+    ts: str,
+    strategy_id: str,
+    market_id: str = "",
+    order_id: str = "",
+    scoring_status: str = "unknown",
+    rebate_usdc: float = 0.0,
+    source: str = "clob_order_scoring",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Record observed scoring or paid rebates; modeled rewards never enter PnL."""
+    with connect_latency_bot_db(settings) as conn:
+        conn.execute(
+            """
+            INSERT INTO maker_rebate_events (
+                ts, strategy_id, market_id, order_id, scoring_status,
+                rebate_usdc, source, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                strategy_id,
+                market_id,
+                order_id,
+                scoring_status,
+                float(rebate_usdc),
+                source,
+                json.dumps(metadata or {}, sort_keys=True),
+            ),
         )
         conn.commit()
 
@@ -6403,6 +6475,15 @@ def latency_bot_live_temporal_inventory_maker_stats(settings: LatencyBotSettings
             """,
             (cutoff_24h_ts,),
         ).fetchone()
+        rebate_row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN scoring_status = 'scoring' THEN 1 ELSE 0 END) AS scoring_orders,
+                SUM(COALESCE(rebate_usdc, 0.0)) AS actual_rebate_usdc
+            FROM maker_rebate_events
+            WHERE strategy_id = 'temporal_inventory_maker'
+            """
+        ).fetchone()
     open_notional = round(sum(float(row["notional_usdc"] or 0.0) for row in open_rows), 6)
     heartbeat = dict(heartbeat_row) if heartbeat_row is not None else {}
     armed = (
@@ -6432,6 +6513,8 @@ def latency_bot_live_temporal_inventory_maker_stats(settings: LatencyBotSettings
         "blocked_24h": int(summary_row["blocked"] or 0) if summary_row else 0,
         "cancelled_24h": int(summary_row["cancelled"] or 0) if summary_row else 0,
         "failed_24h": int(summary_row["failed"] or 0) if summary_row else 0,
+        "reward_scoring_orders": int(rebate_row["scoring_orders"] or 0) if rebate_row else 0,
+        "actual_rebate_pnl_usdc": round(float(rebate_row["actual_rebate_usdc"] or 0.0), 6) if rebate_row else 0.0,
         "last_heartbeat_ts": str(heartbeat.get("ts") or ""),
         "last_heartbeat_status": str(heartbeat.get("status") or ""),
         "last_heartbeat_reason": str(heartbeat.get("reason") or ""),

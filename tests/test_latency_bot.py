@@ -31,6 +31,8 @@ from latency_bot.feeds.discovery import _normalize_latency_discovery_payload
 from latency_bot.feeds.polymarket import refresh_polymarket_cache
 from latency_bot.strategy.fair_value import build_fair_values, compute_updown_fair_yes
 from latency_bot.strategy.complete_set_arb import build_complete_set_arb_signals
+from latency_bot.strategy.related_market_arb import build_related_market_constraint_graph
+from latency_bot.strategy_truth import build_strategy_truth_rows
 from latency_bot.strategy.signals import (
     build_cex_latency_paper_signals,
     build_late_resolution_capture_paper_signals,
@@ -497,6 +499,10 @@ class LatencyBotScaffoldTest(unittest.TestCase):
                         "market_id": "btc5",
                         "best_bid": 0.41,
                         "best_ask": 0.42,
+                        "no_best_ask": 0.58,
+                        "no_ask_vwap": 0.59,
+                        "no_ask_fillable_usdc": 200.0,
+                        "book_age_ms": 0.0,
                     }
                 ]
             }
@@ -721,6 +727,7 @@ class LatencyBotScaffoldTest(unittest.TestCase):
                 temporal_inventory_maker_paper_max_total_exposure_usdc=500.0,
                 temporal_inventory_maker_paper_quote_ttl_seconds=60,
                 temporal_inventory_maker_paper_force_exit_seconds=5,
+                temporal_inventory_maker_paper_queue_ahead_fraction=0.0,
                 taker_fee_per_share=0.0,
             )
             latency_bot_init(settings)
@@ -858,14 +865,14 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             stats = latency_bot_temporal_inventory_maker_paper_stats(settings)
             summary = stats["summary"]
             market = stats["markets"][0]
-            self.assertEqual(market["state"], "LOCKED_PAIR")
-            self.assertAlmostEqual(float(market["yes_shares"]), float(market["no_shares"]), places=6)
+            self.assertEqual(market["state"], "HEDGING")
+            self.assertGreater(float(market["yes_shares"]), float(market["no_shares"]))
             self.assertGreater(summary["locked_pair_shares"], 0.0)
             self.assertLess(summary["average_pair_cost"], 0.99)
             event_types = {item["event_type"] for item in stats["recent_events"]}
             self.assertIn("SEED", event_types)
             self.assertIn("HEDGE", event_types)
-            self.assertIn("LOCKED_PAIR", event_types)
+            self.assertNotIn("LOCKED_PAIR", event_types)
 
             state = build_latency_bot_dashboard_state(settings, fast=True)
             html = render_latency_bot_dashboard_html(state)
@@ -957,6 +964,7 @@ class LatencyBotScaffoldTest(unittest.TestCase):
                 temporal_inventory_maker_paper_near_touch_min_edge=0.05,
                 temporal_inventory_maker_paper_min_fill_probability=0.01,
                 temporal_inventory_maker_paper_min_expected_value_usdc=0.0,
+                temporal_inventory_maker_paper_aggressive_quotes_enabled=True,
                 taker_fee_per_share=0.0,
             )
             latency_bot_init(settings)
@@ -1002,6 +1010,63 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             self.assertTrue(signals[0]["eligible"])
             self.assertIn(signals[0]["quote_style"], {"MID_AGGRESSIVE", "NEAR_TOUCH"})
             self.assertGreater(float(signals[0]["order_price"]), 0.41)
+
+    def test_strategy_truth_separates_legacy_and_realistic_promoted_epochs(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = self.make_settings(tmpdir)
+            latency_bot_init(settings)
+            variant_id = settings.promoted_variant_ids[0]
+            for execution_model, pnl in (("legacy", 20.0), ("vwap_latency_partial_fill_v1", 5.0)):
+                position = create_position(
+                    settings,
+                    ts="2099-01-01T00:00:00Z",
+                    market_id=f"market-{execution_model}",
+                    asset="btc",
+                    side="YES",
+                    entry_price=0.50,
+                    size=10.0,
+                    mode=f"promoted_variant:{variant_id}",
+                    signal={"execution_model": execution_model},
+                )
+                close_position(
+                    settings,
+                    position_id=position["position_id"],
+                    ts="2099-01-01T00:01:00Z",
+                    exit_price=0.60,
+                    pnl=pnl,
+                    reason="TEST",
+                )
+            rows = {row["strategy_id"]: row for row in build_strategy_truth_rows(settings)}
+            legacy = rows["promoted:legacy_family"]
+            realistic = rows[f"promoted:{variant_id}:v1"]
+            self.assertEqual(legacy["execution_tier"], "optimistic_simulation")
+            self.assertEqual(legacy["model_pnl_usdc"], 20.0)
+            self.assertIsNone(legacy["executable_paper_pnl_usdc"])
+            self.assertEqual(realistic["execution_tier"], "executable_paper")
+            self.assertEqual(realistic["executable_paper_pnl_usdc"], 5.0)
+            self.assertIsNone(realistic["model_pnl_usdc"])
+
+    def test_related_market_constraint_graph_requires_explicit_logic(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = self.make_settings(tmpdir)
+            markets = {
+                "items": [
+                    {"market_id": "a", "asset": "test", "question": "A", "constraint_group_id": "g", "constraint_exhaustive": True, "constraint_mutually_exclusive": True},
+                    {"market_id": "b", "asset": "test", "question": "B", "constraint_group_id": "g", "constraint_exhaustive": True, "constraint_mutually_exclusive": True},
+                ]
+            }
+            cache = {
+                "items": [
+                    {"market_id": "a", "best_ask": 0.40, "ask_vwap": 0.40, "ask_fillable_usdc": 20.0},
+                    {"market_id": "b", "best_ask": 0.45, "ask_vwap": 0.45, "ask_fillable_usdc": 20.0},
+                ]
+            }
+            graph = build_related_market_constraint_graph(settings, markets_payload=markets, polymarket_cache=cache)
+            self.assertEqual(len(graph["opportunities"]), 1)
+            self.assertAlmostEqual(graph["opportunities"][0]["edge_per_share"], 0.15)
+            markets["items"][1]["constraint_exhaustive"] = False
+            blocked = build_related_market_constraint_graph(settings, markets_payload=markets, polymarket_cache=cache)
+            self.assertEqual(blocked["opportunities"], [])
 
     def test_live_temporal_inventory_maker_dry_run_records_candidate(self) -> None:
         with TemporaryDirectory() as tmpdir:

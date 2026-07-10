@@ -794,6 +794,7 @@ def _temporal_empty_market_row(signal: dict[str, Any], market: dict[str, Any] | 
         "last_signal_side": str(signal.get("side") or ""),
         "last_signal_edge": float(signal.get("edge") or 0.0),
         "last_quote_id": "",
+        "execution_model": "queue_aware_passive_v1",
     }
 
 
@@ -845,6 +846,7 @@ def _temporal_persist_market(settings: LatencyBotSettings, row: dict[str, Any], 
         last_signal_side=str(row.get("last_signal_side") or ""),
         last_signal_edge=float(row.get("last_signal_edge") or 0.0),
         last_quote_id=str(row.get("last_quote_id") or ""),
+        execution_model=str(row.get("execution_model") or "queue_aware_passive_v1"),
     )
 
 
@@ -876,18 +878,29 @@ def _temporal_post_only_quote_price(cache: dict[str, Any], side: str, ceiling: f
     return round(max(quote_price, 0.0), 4)
 
 
-def _temporal_quote_fill(quote: dict[str, Any], cache: dict[str, Any]) -> tuple[float, float, float]:
+def _temporal_quote_fill(
+    settings: LatencyBotSettings,
+    quote: dict[str, Any],
+    cache: dict[str, Any],
+) -> tuple[float, float, float, float]:
     side = str(quote.get("side") or "").upper()
     quote_price = float(quote.get("price") or 0.0)
     quote_size = float(quote.get("size") or 0.0)
     best_bid, best_ask = _temporal_book_side(cache, side)
     if quote_price <= 0.0 or quote_size <= 0.0 or best_ask <= 0.0 or best_ask > quote_price:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     moved_through = best_ask < quote_price - 0.005
-    fill_fraction = 1.0 if moved_through else 0.50
+    depth_key = "bids_depth_usdc" if side == "YES" else "no_bids_depth_usdc"
+    queue_ahead_usdc = max(float(cache.get(depth_key) or cache.get("bid_depth_usdc") or 0.0), 0.0) * min(
+        max(float(settings.temporal_inventory_maker_paper_queue_ahead_fraction), 0.0),
+        1.0,
+    )
+    quote_notional = quote_price * quote_size
+    queue_share = quote_notional / (queue_ahead_usdc + quote_notional) if quote_notional > 0.0 else 0.0
+    fill_fraction = min(0.50, max(queue_share, 0.05)) if moved_through else min(0.25, queue_share)
     fill_size = round(quote_size * fill_fraction, 8)
     adverse_loss = max(quote_price - best_bid, 0.0) * fill_size if moved_through else 0.0
-    return quote_price, fill_size, round(adverse_loss, 8)
+    return quote_price, fill_size, round(adverse_loss, 8), round(queue_ahead_usdc, 6)
 
 
 def _temporal_quote_ttl_seconds(settings: LatencyBotSettings, quote: dict[str, Any]) -> int:
@@ -1111,7 +1124,7 @@ def run_temporal_inventory_maker_paper_cycle(
             cancelled_quotes.append(quote)
             continue
 
-        fill_price, fill_size, adverse_loss = _temporal_quote_fill(quote, cache or {})
+        fill_price, fill_size, adverse_loss, queue_ahead_usdc = _temporal_quote_fill(settings, quote, cache or {})
         if fill_size <= 0.0:
             if signal is None or not bool(signal.get("eligible")) or float(signal.get("edge") or 0.0) < min_edge:
                 close_temporal_inventory_quote(settings, quote_id=str(quote.get("quote_id") or ""), ts=ts, status="cancelled", cancel_reason="signal decayed")
@@ -1179,6 +1192,7 @@ def run_temporal_inventory_maker_paper_cycle(
                 "fill_probability": float(quote.get("fill_probability") or 0.0),
                 "expected_value_usdc": float(quote.get("expected_value_usdc") or 0.0),
                 "adverse_selection_loss_usdc": adverse_loss,
+                "queue_ahead_usdc": queue_ahead_usdc,
             },
         )
         record_temporal_inventory_event(
@@ -1464,7 +1478,8 @@ def run_temporal_inventory_maker_paper_cycle(
                 hedge_edge = max(1.0 - (avg_yes + hedge_price), 0.0)
                 quote_style = "HEDGE_LOCK"
             elif side == "YES":
-                quote_price = max(quote_price - min_edge, 0.0)
+                inventory_skew = min((yes_shares - no_shares) * float(settings.temporal_inventory_maker_paper_inventory_skew_per_share), 0.05)
+                quote_price = max(quote_price - min_edge - inventory_skew, 0.0)
                 reason = "inventory-adjusted same-side quote"
                 quote_style = "INVENTORY_SAME_SIDE"
         elif no_shares > yes_shares:
@@ -1478,7 +1493,8 @@ def run_temporal_inventory_maker_paper_cycle(
                 hedge_edge = max(1.0 - (avg_no + hedge_price), 0.0)
                 quote_style = "HEDGE_LOCK"
             elif side == "NO":
-                quote_price = max(quote_price - min_edge, 0.0)
+                inventory_skew = min((no_shares - yes_shares) * float(settings.temporal_inventory_maker_paper_inventory_skew_per_share), 0.05)
+                quote_price = max(quote_price - min_edge - inventory_skew, 0.0)
                 reason = "inventory-adjusted same-side quote"
                 quote_style = "INVENTORY_SAME_SIDE"
         side_bid, side_ask = _temporal_book_side(cache, side)
@@ -1989,6 +2005,66 @@ def run_shadow_btc_yes_variant_paper_cycle(
     }
 
 
+def _promoted_realistic_entry(
+    settings: LatencyBotSettings,
+    signal: dict[str, Any],
+    cache: dict[str, Any],
+    *,
+    side: str,
+) -> tuple[float, float, str]:
+    side = side.upper()
+    if not settings.promoted_execution_realism_enabled:
+        price = float(signal.get("order_price") or (signal.get("yes_ask") if side == "YES" else signal.get("no_ask")) or 0.0)
+        size = float(settings.paper_position_notional_usdc) / price if price > 0.0 else 0.0
+        return price, size, ""
+    if not cache:
+        return 0.0, 0.0, "execution-realism block: missing order book"
+    if float(cache.get("book_age_ms") or 0.0) > float(settings.max_book_age_ms):
+        return 0.0, 0.0, "execution-realism block: stale order book"
+    vwap_key = "ask_vwap" if side == "YES" else "no_ask_vwap"
+    ask_key = "best_ask" if side == "YES" else "no_best_ask"
+    fillable_key = "ask_fillable_usdc" if side == "YES" else "no_ask_fillable_usdc"
+    raw_price = float(cache.get(vwap_key) or cache.get(ask_key) or 0.0)
+    if raw_price <= 0.0:
+        return 0.0, 0.0, "execution-realism block: no executable ask"
+    depth_haircut = min(max(float(settings.promoted_execution_depth_haircut), 0.0), 1.0)
+    partial_fraction = min(max(float(settings.promoted_execution_partial_fill_fraction), 0.0), 1.0)
+    available_notional = max(float(cache.get(fillable_key) or 0.0) * depth_haircut, 0.0)
+    target_notional = max(float(settings.paper_position_notional_usdc) * partial_fraction, 0.0)
+    filled_notional = min(target_notional, available_notional)
+    if filled_notional < 1.0:
+        return 0.0, 0.0, "execution-realism block: insufficient haircut-adjusted ask depth"
+    latency_seconds = max(float(settings.promoted_execution_latency_ms), 0.0) / 1000.0
+    execution_cost = (
+        max(float(settings.taker_fee_per_share), 0.0)
+        + max(float(settings.taker_slippage_per_share), 0.0)
+        + max(float(settings.promoted_execution_extra_slippage_per_share), 0.0) * (1.0 + latency_seconds)
+    )
+    all_in_price = min(raw_price + execution_cost, 1.0)
+    size = filled_notional / all_in_price if all_in_price > 0.0 else 0.0
+    return round(all_in_price, 6), round(size, 8), ""
+
+
+def _promoted_realistic_exit_price(
+    settings: LatencyBotSettings,
+    position: dict[str, Any],
+    cache: dict[str, Any],
+) -> float:
+    if not settings.promoted_execution_realism_enabled:
+        return _current_exit_price(position, cache)
+    side = str(position.get("side") or "").upper()
+    vwap_key = "bid_vwap" if side == "YES" else "no_bid_vwap"
+    bid_key = "best_bid" if side == "YES" else "no_best_bid"
+    raw_price = float(cache.get(vwap_key) or cache.get(bid_key) or _current_exit_price(position, cache) or 0.0)
+    latency_seconds = max(float(settings.promoted_execution_latency_ms), 0.0) / 1000.0
+    execution_cost = (
+        max(float(settings.taker_fee_per_share), 0.0)
+        + max(float(settings.taker_slippage_per_share), 0.0)
+        + max(float(settings.promoted_execution_extra_slippage_per_share), 0.0) * (1.0 + latency_seconds)
+    )
+    return round(max(raw_price - execution_cost, 0.0), 6)
+
+
 def run_promoted_variant_paper_cycle(
     settings: LatencyBotSettings,
     *,
@@ -2035,7 +2111,7 @@ def run_promoted_variant_paper_cycle(
         cache = cache_by_id.get(market_id) or latest_books.get(market_id)
         if cache is None:
             continue
-        exit_price = _current_exit_price(position, cache)
+        exit_price = _promoted_realistic_exit_price(settings, position, cache)
         if market is None:
             pnl = _pnl(position, exit_price)
             close_position(settings, position_id=str(position.get("position_id") or ""), ts=ts, exit_price=exit_price, pnl=pnl, reason="MARKET_ROLLED_OFF")
@@ -2116,10 +2192,15 @@ def run_promoted_variant_paper_cycle(
         if not allowed:
             entry_blocks.append({"variant_id": variant_id, "market_id": market_id, "reason": reason})
             continue
-        entry_price = float(signal.get("order_price") or (signal.get("yes_ask") if side == "YES" else signal.get("no_ask")) or 0.0)
-        if entry_price <= 0.0 or entry_price < settings.min_trade_price or entry_price > settings.max_trade_price:
+        cache = cache_by_id.get(market_id)
+        entry_price, size, execution_reason = _promoted_realistic_entry(settings, signal, cache or {}, side=side)
+        if execution_reason:
+            entry_blocks.append({"variant_id": variant_id, "market_id": market_id, "reason": execution_reason})
             continue
-        size = settings.paper_position_notional_usdc / entry_price
+        if entry_price <= 0.0 or entry_price < settings.min_trade_price or entry_price > settings.max_trade_price or size <= 0.0:
+            continue
+        execution_signal = dict(signal)
+        execution_signal["execution_model"] = "vwap_latency_partial_fill_v1" if settings.promoted_execution_realism_enabled else "legacy"
         position = create_position(
             settings,
             ts=ts,
@@ -2129,7 +2210,7 @@ def run_promoted_variant_paper_cycle(
             entry_price=entry_price,
             size=size,
             mode=f"{PROMOTED_VARIANT_MODE_PREFIX}{variant_id}",
-            signal=signal,
+            signal=execution_signal,
         )
         opened.append(position)
         open_market_ids.add(market_id)
@@ -2144,6 +2225,7 @@ def run_promoted_variant_paper_cycle(
         "entry_blocks_count": len(entry_blocks),
         "entry_blocks": entry_blocks,
         "open_positions_count": sum(1 for position in load_open_positions(settings) if _promoted_variant_id(position)),
+        "execution_model": "vwap_latency_partial_fill" if settings.promoted_execution_realism_enabled else "legacy_top_of_book",
     }
 
 
