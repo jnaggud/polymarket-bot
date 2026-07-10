@@ -23,6 +23,12 @@ def _iso_or_now(value: datetime | None) -> str:
     return current.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalize_latency_discovery_payload(
     payload: dict[str, Any],
     settings: LatencyBotSettings,
@@ -72,6 +78,17 @@ def _normalize_latency_discovery_payload(
                 "created_at": seen_ts,
                 "first_seen_at": seen_ts,
                 "status": "tracked",
+                "event_id": str(market.get("event_id") or market.get("eventId") or ""),
+                "constraint_group_id": str(
+                    market.get("constraint_group_id")
+                    or market.get("constraintGroupId")
+                    or market.get("negRiskMarketID")
+                    or market.get("neg_risk_market_id")
+                    or ""
+                ),
+                "constraint_exhaustive": _truthy(market.get("constraint_exhaustive") or market.get("constraintExhaustive")),
+                "constraint_mutually_exclusive": _truthy(market.get("constraint_mutually_exclusive") or market.get("constraintMutuallyExclusive")),
+                "outcome_name": str(market.get("outcome_name") or market.get("outcomeName") or question),
             }
         )
     items.sort(key=lambda item: (float(item.get("hours_to_expiry", 0.0)), str(item.get("asset", "")), str(item.get("question", ""))))

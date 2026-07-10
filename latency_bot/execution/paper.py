@@ -794,6 +794,7 @@ def _temporal_empty_market_row(signal: dict[str, Any], market: dict[str, Any] | 
         "last_signal_side": str(signal.get("side") or ""),
         "last_signal_edge": float(signal.get("edge") or 0.0),
         "last_quote_id": "",
+        "execution_model": "queue_aware_passive_v1",
     }
 
 
@@ -845,6 +846,7 @@ def _temporal_persist_market(settings: LatencyBotSettings, row: dict[str, Any], 
         last_signal_side=str(row.get("last_signal_side") or ""),
         last_signal_edge=float(row.get("last_signal_edge") or 0.0),
         last_quote_id=str(row.get("last_quote_id") or ""),
+        execution_model=str(row.get("execution_model") or "queue_aware_passive_v1"),
     )
 
 
@@ -876,18 +878,80 @@ def _temporal_post_only_quote_price(cache: dict[str, Any], side: str, ceiling: f
     return round(max(quote_price, 0.0), 4)
 
 
-def _temporal_quote_fill(quote: dict[str, Any], cache: dict[str, Any]) -> tuple[float, float, float]:
+def _temporal_quote_fill(
+    settings: LatencyBotSettings,
+    quote: dict[str, Any],
+    cache: dict[str, Any],
+) -> tuple[float, float, float, float]:
     side = str(quote.get("side") or "").upper()
     quote_price = float(quote.get("price") or 0.0)
     quote_size = float(quote.get("size") or 0.0)
     best_bid, best_ask = _temporal_book_side(cache, side)
     if quote_price <= 0.0 or quote_size <= 0.0 or best_ask <= 0.0 or best_ask > quote_price:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     moved_through = best_ask < quote_price - 0.005
-    fill_fraction = 1.0 if moved_through else 0.50
+    depth_key = "bids_depth_usdc" if side == "YES" else "no_bids_depth_usdc"
+    queue_ahead_usdc = max(float(cache.get(depth_key) or cache.get("bid_depth_usdc") or 0.0), 0.0) * min(
+        max(float(settings.temporal_inventory_maker_paper_queue_ahead_fraction), 0.0),
+        1.0,
+    )
+    quote_notional = quote_price * quote_size
+    queue_share = quote_notional / (queue_ahead_usdc + quote_notional) if quote_notional > 0.0 else 0.0
+    fill_fraction = min(0.50, max(queue_share, 0.05)) if moved_through else min(0.25, queue_share)
     fill_size = round(quote_size * fill_fraction, 8)
     adverse_loss = max(quote_price - best_bid, 0.0) * fill_size if moved_through else 0.0
-    return quote_price, fill_size, round(adverse_loss, 8)
+    return quote_price, fill_size, round(adverse_loss, 8), round(queue_ahead_usdc, 6)
+
+
+def _temporal_quote_ttl_seconds(settings: LatencyBotSettings, quote: dict[str, Any]) -> int:
+    explicit = int(float(quote.get("ttl_seconds") or 0))
+    if explicit > 0:
+        return explicit
+    style = str(quote.get("quote_style") or "").upper()
+    reason = str(quote.get("reason") or "").lower()
+    if style == "HEDGE_LOCK" or "hedge" in reason:
+        return max(int(settings.temporal_inventory_maker_paper_hedge_ttl_seconds), 1)
+    if style in {"MID_AGGRESSIVE", "NEAR_TOUCH"}:
+        return max(int(settings.temporal_inventory_maker_paper_high_edge_ttl_seconds), 1)
+    return max(int(settings.temporal_inventory_maker_paper_quote_ttl_seconds), 1)
+
+
+def _temporal_ttl_for_style(settings: LatencyBotSettings, style: str) -> int:
+    style = style.upper()
+    if style == "HEDGE_LOCK":
+        return max(int(settings.temporal_inventory_maker_paper_hedge_ttl_seconds), 1)
+    if style in {"MID_AGGRESSIVE", "NEAR_TOUCH"}:
+        return max(int(settings.temporal_inventory_maker_paper_high_edge_ttl_seconds), 1)
+    return max(int(settings.temporal_inventory_maker_paper_quote_ttl_seconds), 1)
+
+
+def _temporal_quote_expected_value(
+    *,
+    quote_price: float,
+    notional: float,
+    edge: float,
+    fill_probability: float,
+    spread: float,
+) -> float:
+    if quote_price <= 0.0 or notional <= 0.0 or edge <= 0.0 or fill_probability <= 0.0:
+        return 0.0
+    shares = notional / quote_price
+    adverse_penalty = min(max(spread, 0.0) * 0.10, 0.025) * shares * fill_probability
+    return round(edge * shares * fill_probability - adverse_penalty, 6)
+
+
+def _temporal_estimate_fill_probability(
+    *,
+    best_bid: float,
+    best_ask: float,
+    quote_price: float,
+    edge: float,
+) -> float:
+    if best_bid <= 0.0 or best_ask <= 0.0 or quote_price <= 0.0 or best_ask <= best_bid:
+        return 0.0
+    spread = max(best_ask - best_bid, 0.01)
+    proximity = 1.0 - min(max((best_ask - quote_price) / spread, 0.0), 1.0)
+    return round(min(max((0.02 + 0.70 * proximity) * (1.0 + min(max(edge, 0.0), 0.20)), 0.0), 0.85), 6)
 
 
 def _temporal_daily_realized_pnl(settings: LatencyBotSettings) -> float:
@@ -1010,13 +1074,13 @@ def run_temporal_inventory_maker_paper_cycle(
     cache_by_id = {str(item.get("market_id") or ""): item for item in cache_items if isinstance(item, dict)}
     signals_by_market = {str(item.get("market_id") or ""): item for item in signals if isinstance(item, dict)}
     max_pair_cost = float(settings.temporal_inventory_maker_paper_max_pair_cost)
-    ttl_seconds = max(int(settings.temporal_inventory_maker_paper_quote_ttl_seconds), 1)
     force_exit_seconds = max(int(settings.temporal_inventory_maker_paper_force_exit_seconds), 0)
     base_order_usdc = max(float(settings.temporal_inventory_maker_paper_base_order_usdc), 0.0)
     min_edge = max(float(settings.temporal_inventory_maker_paper_min_net_edge), 0.0)
     max_market_exposure = max(float(settings.temporal_inventory_maker_paper_max_market_exposure_usdc), 0.0)
     max_total_exposure = max(float(settings.temporal_inventory_maker_paper_max_total_exposure_usdc), 0.0)
     daily_loss_limit = max(float(settings.temporal_inventory_maker_paper_daily_loss_limit_usdc), 0.0)
+    unpaired_timeout_seconds = max(int(settings.temporal_inventory_maker_paper_unpaired_timeout_seconds), 0)
 
     active_rows = load_temporal_inventory_open_markets(settings)
     active_by_market = {str(row.get("market_id") or ""): row for row in active_rows}
@@ -1034,6 +1098,7 @@ def run_temporal_inventory_maker_paper_cycle(
         cache = cache_by_id.get(market_id)
         signal = signals_by_market.get(market_id)
         quote_age = (_ts_to_dt(ts) - _ts_to_dt(str(quote.get("ts_created") or ts))).total_seconds()
+        ttl_seconds = _temporal_quote_ttl_seconds(settings, quote)
         cancel_reason = ""
         if quote_age > ttl_seconds:
             cancel_reason = "quote ttl expired"
@@ -1041,8 +1106,6 @@ def run_temporal_inventory_maker_paper_cycle(
             cancel_reason = "market data unavailable"
         elif _seconds_remaining(market) <= force_exit_seconds:
             cancel_reason = "market near expiry"
-        elif signal is None or not bool(signal.get("eligible")) or float(signal.get("edge") or 0.0) < min_edge:
-            cancel_reason = "signal decayed"
         if cancel_reason:
             close_temporal_inventory_quote(settings, quote_id=str(quote.get("quote_id") or ""), ts=ts, status="cancelled", cancel_reason=cancel_reason)
             record_temporal_inventory_event(
@@ -1061,8 +1124,24 @@ def run_temporal_inventory_maker_paper_cycle(
             cancelled_quotes.append(quote)
             continue
 
-        fill_price, fill_size, adverse_loss = _temporal_quote_fill(quote, cache or {})
+        fill_price, fill_size, adverse_loss, queue_ahead_usdc = _temporal_quote_fill(settings, quote, cache or {})
         if fill_size <= 0.0:
+            if signal is None or not bool(signal.get("eligible")) or float(signal.get("edge") or 0.0) < min_edge:
+                close_temporal_inventory_quote(settings, quote_id=str(quote.get("quote_id") or ""), ts=ts, status="cancelled", cancel_reason="signal decayed")
+                record_temporal_inventory_event(
+                    settings,
+                    ts=ts,
+                    market_id=market_id,
+                    event_type="CANCEL",
+                    state=str((active_by_market.get(market_id) or {}).get("state") or "FLAT"),
+                    side=str(quote.get("side") or ""),
+                    price=float(quote.get("price") or 0.0),
+                    size=float(quote.get("size") or 0.0),
+                    notional_usdc=float(quote.get("notional_usdc") or 0.0),
+                    reason="signal decayed",
+                )
+                events_count += 1
+                cancelled_quotes.append(quote)
             continue
         side = str(quote.get("side") or "").upper()
         row = active_by_market.get(market_id) or _temporal_empty_market_row(signal or {"market_id": market_id}, market, ts)
@@ -1107,7 +1186,14 @@ def run_temporal_inventory_maker_paper_cycle(
             notional_usdc=notional,
             pair_cost=pair_cost,
             reason="conservative queue fill",
-            metadata={"quote_id": str(quote.get("quote_id") or ""), "adverse_selection_loss_usdc": adverse_loss},
+            metadata={
+                "quote_id": str(quote.get("quote_id") or ""),
+                "quote_style": str(quote.get("quote_style") or "PASSIVE"),
+                "fill_probability": float(quote.get("fill_probability") or 0.0),
+                "expected_value_usdc": float(quote.get("expected_value_usdc") or 0.0),
+                "adverse_selection_loss_usdc": adverse_loss,
+                "queue_ahead_usdc": queue_ahead_usdc,
+            },
         )
         record_temporal_inventory_event(
             settings,
@@ -1151,6 +1237,7 @@ def run_temporal_inventory_maker_paper_cycle(
         seconds_left = _seconds_remaining(market)
         yes_shares = float(row.get("yes_shares") or 0.0)
         no_shares = float(row.get("no_shares") or 0.0)
+        signal = signals_by_market.get(market_id)
         if seconds_left <= force_exit_seconds and (yes_shares > 0.0 or no_shares > 0.0):
             paired, pair_cost, pair_pnl = _temporal_pair_metrics(row)
             if paired > 0.0:
@@ -1190,11 +1277,39 @@ def run_temporal_inventory_maker_paper_cycle(
             active_by_market[market_id] = row
             continue
 
-        signal = signals_by_market.get(market_id)
+        current_side = "YES" if yes_shares > no_shares else "NO" if no_shares > yes_shares else ""
+        unpaired_size = abs(yes_shares - no_shares)
+        if current_side and unpaired_size > 1e-8 and unpaired_timeout_seconds > 0:
+            try:
+                inventory_age = (_ts_to_dt(ts) - _ts_to_dt(str(row.get("first_seen_ts") or ts))).total_seconds()
+            except Exception:
+                inventory_age = float(unpaired_timeout_seconds)
+            signal_side = str((signal or {}).get("side") or "").upper()
+            signal_edge = float((signal or {}).get("edge") or 0.0)
+            same_side_still_strong = (
+                signal is not None
+                and bool(signal.get("eligible"))
+                and signal_side == current_side
+                and signal_edge >= (2.0 * min_edge)
+            )
+            if inventory_age >= unpaired_timeout_seconds and not same_side_still_strong:
+                row = _temporal_sell_side(
+                    settings,
+                    row,
+                    ts=ts,
+                    cache=cache,
+                    side=current_side,
+                    size=unpaired_size,
+                    reason="unpaired inventory timeout",
+                )
+                events_count += 1
+                row = _temporal_persist_market(settings, row, ts=ts)
+                active_by_market[market_id] = row
+                continue
+
         if signal is None or not bool(signal.get("eligible")):
             continue
         signal_side = str(signal.get("side") or "").upper()
-        current_side = "YES" if yes_shares > no_shares else "NO" if no_shares > yes_shares else ""
         if current_side and signal_side and signal_side != current_side and float(signal.get("edge") or 0.0) >= (2.0 * min_edge):
             record_temporal_inventory_event(
                 settings,
@@ -1226,6 +1341,98 @@ def run_temporal_inventory_maker_paper_cycle(
     active_by_market = {str(row.get("market_id") or ""): row for row in active_rows}
     daily_pnl = _temporal_daily_realized_pnl(settings)
     allow_new_quotes = daily_loss_limit <= 0.0 or daily_pnl > -daily_loss_limit
+    for market_id, row in list(active_by_market.items()):
+        if not allow_new_quotes:
+            break
+        if market_id in markets_filled_this_cycle:
+            continue
+        if any(str(quote.get("market_id") or "") == market_id for quote in open_quotes):
+            continue
+        market = market_by_id.get(market_id)
+        cache = cache_by_id.get(market_id)
+        if market is None or cache is None or _seconds_remaining(market) <= force_exit_seconds:
+            continue
+        yes_shares = float(row.get("yes_shares") or 0.0)
+        no_shares = float(row.get("no_shares") or 0.0)
+        if abs(yes_shares - no_shares) <= 1e-8:
+            continue
+        if yes_shares > no_shares:
+            side = "NO"
+            owned_shares = yes_shares
+            owned_cost = float(row.get("yes_cost_usdc") or 0.0)
+            hedge_share_cap = yes_shares - no_shares
+        else:
+            side = "YES"
+            owned_shares = no_shares
+            owned_cost = float(row.get("no_cost_usdc") or 0.0)
+            hedge_share_cap = no_shares - yes_shares
+        avg_owned = owned_cost / owned_shares if owned_shares > 0.0 else 0.0
+        quote_price = _temporal_post_only_quote_price(cache, side)
+        if quote_price <= 0.0 or avg_owned + quote_price > max_pair_cost:
+            continue
+        side_bid, side_ask = _temporal_book_side(cache, side)
+        edge = max(1.0 - (avg_owned + quote_price), 0.0)
+        fill_probability = _temporal_estimate_fill_probability(
+            best_bid=side_bid,
+            best_ask=side_ask,
+            quote_price=quote_price,
+            edge=edge,
+        )
+        if fill_probability < max(float(settings.temporal_inventory_maker_paper_min_fill_probability) * 0.5, 0.005):
+            continue
+        market_exposure = _temporal_market_exposure(row, open_quotes)
+        total_exposure = _temporal_total_exposure(active_rows, open_quotes)
+        available_market = max(max_market_exposure - market_exposure, 0.0) if max_market_exposure > 0.0 else base_order_usdc
+        available_total = max(max_total_exposure - total_exposure, 0.0) if max_total_exposure > 0.0 else base_order_usdc
+        notional = min(base_order_usdc, available_market, available_total, hedge_share_cap * quote_price)
+        if notional < 5.0:
+            continue
+        expected_value = _temporal_quote_expected_value(
+            quote_price=quote_price,
+            notional=notional,
+            edge=edge,
+            fill_probability=fill_probability,
+            spread=max(side_ask - side_bid, 0.0),
+        )
+        quote = create_temporal_inventory_quote(
+            settings,
+            ts=ts,
+            market_id=market_id,
+            side=side,
+            price=quote_price,
+            size=notional / quote_price,
+            edge=edge,
+            reason="hedge quote to lock owned inventory",
+            quote_style="HEDGE_LOCK",
+            fill_probability=fill_probability,
+            expected_value_usdc=expected_value,
+            ttl_seconds=_temporal_ttl_for_style(settings, "HEDGE_LOCK"),
+        )
+        opened_quotes.append(quote)
+        open_quotes.append(quote)
+        row["last_quote_id"] = str(quote.get("quote_id") or "")
+        row = _temporal_persist_market(settings, row, ts=ts)
+        active_by_market[market_id] = row
+        record_temporal_inventory_event(
+            settings,
+            ts=ts,
+            market_id=market_id,
+            event_type="MAKER_QUOTE",
+            state=str(row.get("state") or "SEEDED"),
+            side=side,
+            price=quote_price,
+            size=notional / quote_price,
+            notional_usdc=notional,
+            reason="hedge quote to lock owned inventory",
+            metadata={
+                "quote_style": "HEDGE_LOCK",
+                "fill_probability": fill_probability,
+                "expected_value_usdc": expected_value,
+                "locked_pair_edge": edge,
+            },
+        )
+        events_count += 1
+
     eligible_signals = sorted(
         [item for item in signals if bool(item.get("eligible"))],
         key=lambda item: float(item.get("edge") or 0.0),
@@ -1257,7 +1464,9 @@ def run_temporal_inventory_maker_paper_cycle(
         side = str(signal.get("side") or "").upper()
         quote_price = float(signal.get("order_price") or 0.0)
         reason = "seed maker quote"
+        quote_style = str(signal.get("quote_style") or "PASSIVE").upper()
         hedge_share_cap: float | None = None
+        hedge_edge: float | None = None
         if yes_shares > no_shares:
             hedge_price = _temporal_post_only_quote_price(cache, "NO")
             avg_yes = float(row.get("yes_cost_usdc") or 0.0) / yes_shares if yes_shares > 0.0 else 0.0
@@ -1266,9 +1475,13 @@ def run_temporal_inventory_maker_paper_cycle(
                 quote_price = hedge_price
                 reason = "hedge quote to lock owned YES inventory"
                 hedge_share_cap = yes_shares - no_shares
+                hedge_edge = max(1.0 - (avg_yes + hedge_price), 0.0)
+                quote_style = "HEDGE_LOCK"
             elif side == "YES":
-                quote_price = max(quote_price - min_edge, 0.0)
+                inventory_skew = min((yes_shares - no_shares) * float(settings.temporal_inventory_maker_paper_inventory_skew_per_share), 0.05)
+                quote_price = max(quote_price - min_edge - inventory_skew, 0.0)
                 reason = "inventory-adjusted same-side quote"
+                quote_style = "INVENTORY_SAME_SIDE"
         elif no_shares > yes_shares:
             hedge_price = _temporal_post_only_quote_price(cache, "YES")
             avg_no = float(row.get("no_cost_usdc") or 0.0) / no_shares if no_shares > 0.0 else 0.0
@@ -1277,13 +1490,19 @@ def run_temporal_inventory_maker_paper_cycle(
                 quote_price = hedge_price
                 reason = "hedge quote to lock owned NO inventory"
                 hedge_share_cap = no_shares - yes_shares
+                hedge_edge = max(1.0 - (avg_no + hedge_price), 0.0)
+                quote_style = "HEDGE_LOCK"
             elif side == "NO":
-                quote_price = max(quote_price - min_edge, 0.0)
+                inventory_skew = min((no_shares - yes_shares) * float(settings.temporal_inventory_maker_paper_inventory_skew_per_share), 0.05)
+                quote_price = max(quote_price - min_edge - inventory_skew, 0.0)
                 reason = "inventory-adjusted same-side quote"
+                quote_style = "INVENTORY_SAME_SIDE"
         side_bid, side_ask = _temporal_book_side(cache, side)
         if side_ask > 0.01:
             quote_price = min(quote_price, side_ask - 0.01)
-        quote_price = round(max(min(quote_price, side_bid + 0.01 if side_bid > 0.0 else quote_price), 0.0), 4)
+        if quote_style not in {"MID_AGGRESSIVE", "NEAR_TOUCH"}:
+            quote_price = min(quote_price, side_bid + 0.01 if side_bid > 0.0 else quote_price)
+        quote_price = round(max(quote_price, 0.0), 4)
         if quote_price <= 0.0:
             entry_blocks.append({"market_id": market_id, "reason": "invalid inventory-adjusted quote"})
             continue
@@ -1298,6 +1517,30 @@ def run_temporal_inventory_maker_paper_cycle(
             entry_blocks.append({"market_id": market_id, "reason": "exposure cap hit"})
             continue
         size = notional / quote_price
+        quote_edge = float(signal.get("edge") or 0.0)
+        if hedge_edge is not None:
+            quote_edge = hedge_edge
+        elif quote_price < float(signal.get("order_price") or quote_price):
+            quote_edge += float(signal.get("order_price") or quote_price) - quote_price
+        fill_probability = _temporal_estimate_fill_probability(
+            best_bid=side_bid,
+            best_ask=side_ask,
+            quote_price=quote_price,
+            edge=quote_edge,
+        )
+        expected_value = _temporal_quote_expected_value(
+            quote_price=quote_price,
+            notional=notional,
+            edge=quote_edge,
+            fill_probability=fill_probability,
+            spread=max(side_ask - side_bid, 0.0),
+        )
+        if quote_style != "HEDGE_LOCK" and fill_probability < float(settings.temporal_inventory_maker_paper_min_fill_probability):
+            entry_blocks.append({"market_id": market_id, "reason": "estimated maker fill probability below threshold"})
+            continue
+        if quote_style != "HEDGE_LOCK" and expected_value < float(settings.temporal_inventory_maker_paper_min_expected_value_usdc):
+            entry_blocks.append({"market_id": market_id, "reason": "expected maker quote value below threshold"})
+            continue
         quote = create_temporal_inventory_quote(
             settings,
             ts=ts,
@@ -1305,8 +1548,12 @@ def run_temporal_inventory_maker_paper_cycle(
             side=side,
             price=quote_price,
             size=size,
-            edge=float(signal.get("edge") or 0.0),
+            edge=quote_edge,
             reason=reason,
+            quote_style=quote_style,
+            fill_probability=fill_probability,
+            expected_value_usdc=expected_value,
+            ttl_seconds=_temporal_ttl_for_style(settings, quote_style),
         )
         opened_quotes.append(quote)
         open_quotes.append(quote)
@@ -1329,7 +1576,13 @@ def run_temporal_inventory_maker_paper_cycle(
             size=size,
             notional_usdc=notional,
             reason=reason,
-            metadata={"signal_side": str(signal.get("side") or ""), "edge": float(signal.get("edge") or 0.0)},
+            metadata={
+                "signal_side": str(signal.get("side") or ""),
+                "edge": quote_edge,
+                "quote_style": quote_style,
+                "fill_probability": fill_probability,
+                "expected_value_usdc": expected_value,
+            },
         )
         events_count += 1
 
@@ -1463,12 +1716,31 @@ def run_late_resolution_capture_paper_cycle(
         if market is None or cache is None:
             entry_blocks.append({"market_id": market_id, "reason": "market data unavailable"})
             continue
+        if float(cache.get("book_age_ms") or 0.0) > float(settings.late_resolution_capture_paper_max_book_age_ms):
+            entry_blocks.append({"market_id": market_id, "reason": "book snapshot too stale"})
+            continue
         seconds_left = _seconds_remaining(market)
         if seconds_left < float(settings.late_resolution_capture_paper_min_seconds_left):
             entry_blocks.append({"market_id": market_id, "reason": "too close to expiry"})
             continue
         if seconds_left > float(settings.late_resolution_capture_paper_max_seconds_left):
             entry_blocks.append({"market_id": market_id, "reason": "too far from expiry"})
+            continue
+        side = str(signal.get("side") or "").upper()
+        yes_bid = float(cache.get("best_bid") or 0.0)
+        yes_ask = float(cache.get("best_ask") or 0.0)
+        no_bid = float(cache.get("no_best_bid") or max(1.0 - yes_ask, 0.0))
+        selected_bid = yes_bid if side == "YES" else no_bid
+        min_depth = (
+            float(cache.get("ask_fillable_usdc") or cache.get("asks_depth_usdc") or 0.0)
+            if side == "YES"
+            else float(cache.get("no_ask_fillable_usdc") or cache.get("no_asks_depth_usdc") or 0.0)
+        )
+        if min_depth < float(settings.late_resolution_capture_paper_min_depth_usdc):
+            entry_blocks.append({"market_id": market_id, "reason": "entry depth below threshold"})
+            continue
+        if selected_bid < float(settings.late_resolution_capture_paper_min_exit_bid):
+            entry_blocks.append({"market_id": market_id, "reason": "exit bid below threshold"})
             continue
         price = float(signal.get("order_price") or 0.0)
         if price <= 0.0:
@@ -1490,7 +1762,7 @@ def run_late_resolution_capture_paper_cycle(
             ts=ts,
             market_id=market_id,
             asset=str(signal.get("asset") or market.get("asset") or ""),
-            side=str(signal.get("side") or "").upper(),
+            side=side,
             entry_price=price,
             size=size,
             signal=signal,
@@ -1733,6 +2005,66 @@ def run_shadow_btc_yes_variant_paper_cycle(
     }
 
 
+def _promoted_realistic_entry(
+    settings: LatencyBotSettings,
+    signal: dict[str, Any],
+    cache: dict[str, Any],
+    *,
+    side: str,
+) -> tuple[float, float, str]:
+    side = side.upper()
+    if not settings.promoted_execution_realism_enabled:
+        price = float(signal.get("order_price") or (signal.get("yes_ask") if side == "YES" else signal.get("no_ask")) or 0.0)
+        size = float(settings.paper_position_notional_usdc) / price if price > 0.0 else 0.0
+        return price, size, ""
+    if not cache:
+        return 0.0, 0.0, "execution-realism block: missing order book"
+    if float(cache.get("book_age_ms") or 0.0) > float(settings.max_book_age_ms):
+        return 0.0, 0.0, "execution-realism block: stale order book"
+    vwap_key = "ask_vwap" if side == "YES" else "no_ask_vwap"
+    ask_key = "best_ask" if side == "YES" else "no_best_ask"
+    fillable_key = "ask_fillable_usdc" if side == "YES" else "no_ask_fillable_usdc"
+    raw_price = float(cache.get(vwap_key) or cache.get(ask_key) or 0.0)
+    if raw_price <= 0.0:
+        return 0.0, 0.0, "execution-realism block: no executable ask"
+    depth_haircut = min(max(float(settings.promoted_execution_depth_haircut), 0.0), 1.0)
+    partial_fraction = min(max(float(settings.promoted_execution_partial_fill_fraction), 0.0), 1.0)
+    available_notional = max(float(cache.get(fillable_key) or 0.0) * depth_haircut, 0.0)
+    target_notional = max(float(settings.paper_position_notional_usdc) * partial_fraction, 0.0)
+    filled_notional = min(target_notional, available_notional)
+    if filled_notional < 1.0:
+        return 0.0, 0.0, "execution-realism block: insufficient haircut-adjusted ask depth"
+    latency_seconds = max(float(settings.promoted_execution_latency_ms), 0.0) / 1000.0
+    execution_cost = (
+        max(float(settings.taker_fee_per_share), 0.0)
+        + max(float(settings.taker_slippage_per_share), 0.0)
+        + max(float(settings.promoted_execution_extra_slippage_per_share), 0.0) * (1.0 + latency_seconds)
+    )
+    all_in_price = min(raw_price + execution_cost, 1.0)
+    size = filled_notional / all_in_price if all_in_price > 0.0 else 0.0
+    return round(all_in_price, 6), round(size, 8), ""
+
+
+def _promoted_realistic_exit_price(
+    settings: LatencyBotSettings,
+    position: dict[str, Any],
+    cache: dict[str, Any],
+) -> float:
+    if not settings.promoted_execution_realism_enabled:
+        return _current_exit_price(position, cache)
+    side = str(position.get("side") or "").upper()
+    vwap_key = "bid_vwap" if side == "YES" else "no_bid_vwap"
+    bid_key = "best_bid" if side == "YES" else "no_best_bid"
+    raw_price = float(cache.get(vwap_key) or cache.get(bid_key) or _current_exit_price(position, cache) or 0.0)
+    latency_seconds = max(float(settings.promoted_execution_latency_ms), 0.0) / 1000.0
+    execution_cost = (
+        max(float(settings.taker_fee_per_share), 0.0)
+        + max(float(settings.taker_slippage_per_share), 0.0)
+        + max(float(settings.promoted_execution_extra_slippage_per_share), 0.0) * (1.0 + latency_seconds)
+    )
+    return round(max(raw_price - execution_cost, 0.0), 6)
+
+
 def run_promoted_variant_paper_cycle(
     settings: LatencyBotSettings,
     *,
@@ -1779,7 +2111,7 @@ def run_promoted_variant_paper_cycle(
         cache = cache_by_id.get(market_id) or latest_books.get(market_id)
         if cache is None:
             continue
-        exit_price = _current_exit_price(position, cache)
+        exit_price = _promoted_realistic_exit_price(settings, position, cache)
         if market is None:
             pnl = _pnl(position, exit_price)
             close_position(settings, position_id=str(position.get("position_id") or ""), ts=ts, exit_price=exit_price, pnl=pnl, reason="MARKET_ROLLED_OFF")
@@ -1860,10 +2192,15 @@ def run_promoted_variant_paper_cycle(
         if not allowed:
             entry_blocks.append({"variant_id": variant_id, "market_id": market_id, "reason": reason})
             continue
-        entry_price = float(signal.get("order_price") or (signal.get("yes_ask") if side == "YES" else signal.get("no_ask")) or 0.0)
-        if entry_price <= 0.0 or entry_price < settings.min_trade_price or entry_price > settings.max_trade_price:
+        cache = cache_by_id.get(market_id)
+        entry_price, size, execution_reason = _promoted_realistic_entry(settings, signal, cache or {}, side=side)
+        if execution_reason:
+            entry_blocks.append({"variant_id": variant_id, "market_id": market_id, "reason": execution_reason})
             continue
-        size = settings.paper_position_notional_usdc / entry_price
+        if entry_price <= 0.0 or entry_price < settings.min_trade_price or entry_price > settings.max_trade_price or size <= 0.0:
+            continue
+        execution_signal = dict(signal)
+        execution_signal["execution_model"] = "vwap_latency_partial_fill_v1" if settings.promoted_execution_realism_enabled else "legacy"
         position = create_position(
             settings,
             ts=ts,
@@ -1873,7 +2210,7 @@ def run_promoted_variant_paper_cycle(
             entry_price=entry_price,
             size=size,
             mode=f"{PROMOTED_VARIANT_MODE_PREFIX}{variant_id}",
-            signal=signal,
+            signal=execution_signal,
         )
         opened.append(position)
         open_market_ids.add(market_id)
@@ -1888,6 +2225,7 @@ def run_promoted_variant_paper_cycle(
         "entry_blocks_count": len(entry_blocks),
         "entry_blocks": entry_blocks,
         "open_positions_count": sum(1 for position in load_open_positions(settings) if _promoted_variant_id(position)),
+        "execution_model": "vwap_latency_partial_fill" if settings.promoted_execution_realism_enabled else "legacy_top_of_book",
     }
 
 

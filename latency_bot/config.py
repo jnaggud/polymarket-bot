@@ -221,7 +221,7 @@ class LatencyBotSettings:
     preowned_inventory_arb_per_asset_time_bucket_cap: int = 1
     preowned_inventory_arb_time_bucket_seconds: int = 300
     preowned_inventory_arb_seed_require_original_eligible: bool = False
-    cex_latency_paper_enabled: bool = True
+    cex_latency_paper_enabled: bool = False
     cex_latency_paper_capital_usdc: float = 1000.0
     cex_latency_paper_notional_usdc: float = 50.0
     cex_latency_paper_max_open_positions: int = 3
@@ -240,7 +240,7 @@ class LatencyBotSettings:
     cex_latency_paper_exit_edge_floor: float = 0.0100
     cex_latency_paper_force_exit_seconds: int = 30
     cex_latency_paper_same_market_cooldown_seconds: int = 300
-    btc_fair_value_paper_enabled: bool = True
+    btc_fair_value_paper_enabled: bool = False
     btc_fair_value_paper_capital_usdc: float = 1000.0
     btc_fair_value_paper_notional_usdc: float = 50.0
     btc_fair_value_paper_max_open_positions: int = 3
@@ -269,12 +269,22 @@ class LatencyBotSettings:
     temporal_inventory_maker_paper_min_net_edge: float = 0.0200
     temporal_inventory_maker_paper_max_pair_cost: float = 0.9900
     temporal_inventory_maker_paper_quote_ttl_seconds: int = 12
+    temporal_inventory_maker_paper_high_edge_ttl_seconds: int = 30
+    temporal_inventory_maker_paper_hedge_ttl_seconds: int = 45
+    temporal_inventory_maker_paper_mid_aggressive_min_edge: float = 0.0400
+    temporal_inventory_maker_paper_near_touch_min_edge: float = 0.0800
+    temporal_inventory_maker_paper_min_fill_probability: float = 0.0300
+    temporal_inventory_maker_paper_min_expected_value_usdc: float = 0.0100
+    temporal_inventory_maker_paper_unpaired_timeout_seconds: int = 60
     temporal_inventory_maker_paper_force_exit_seconds: int = 20
     temporal_inventory_maker_paper_daily_loss_limit_usdc: float = 25.0
+    temporal_inventory_maker_paper_aggressive_quotes_enabled: bool = False
+    temporal_inventory_maker_paper_queue_ahead_fraction: float = 0.75
+    temporal_inventory_maker_paper_inventory_skew_per_share: float = 0.0010
     live_temporal_inventory_maker_enabled: bool = False
     live_temporal_inventory_maker_mode: str = "dry_run"
     live_temporal_inventory_maker_confirm: str = ""
-    live_temporal_inventory_maker_capital_usdc: float = 50.0
+    live_temporal_inventory_maker_capital_usdc: float = 25.0
     live_temporal_inventory_maker_base_order_usdc: float = 5.0
     live_temporal_inventory_maker_max_open_orders: int = 1
     live_temporal_inventory_maker_max_orders_per_cycle: int = 1
@@ -285,7 +295,8 @@ class LatencyBotSettings:
     live_temporal_inventory_maker_daily_loss_limit_usdc: float = 5.0
     live_temporal_inventory_maker_require_positive_paper_pnl: bool = True
     live_temporal_inventory_maker_require_reconciliation: bool = True
-    late_resolution_capture_paper_enabled: bool = True
+    live_temporal_inventory_maker_require_validation_gate: bool = True
+    late_resolution_capture_paper_enabled: bool = False
     late_resolution_capture_paper_capital_usdc: float = 1000.0
     late_resolution_capture_paper_notional_usdc: float = 25.0
     late_resolution_capture_paper_max_market_exposure_usdc: float = 50.0
@@ -295,6 +306,9 @@ class LatencyBotSettings:
     late_resolution_capture_paper_min_official_confidence: float = 0.97
     late_resolution_capture_paper_min_boundary_distance_bps: float = 8.0
     late_resolution_capture_paper_min_edge: float = 0.0100
+    late_resolution_capture_paper_min_depth_usdc: float = 50.0
+    late_resolution_capture_paper_min_exit_bid: float = 0.0500
+    late_resolution_capture_paper_max_book_age_ms: float = 5000.0
     late_resolution_capture_paper_daily_loss_limit_usdc: float = 25.0
     wallet_teacher_sniper_enabled: bool = True
     wallet_teacher_sniper_wallet: str = "0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82"
@@ -358,6 +372,18 @@ class LatencyBotSettings:
     kalshi_api_key_id: str = ""
     kalshi_private_key_path: str = ""
     kalshi_private_key_pem: str = ""
+    promoted_execution_realism_enabled: bool = True
+    promoted_execution_latency_ms: float = 750.0
+    promoted_execution_extra_slippage_per_share: float = 0.0030
+    promoted_execution_partial_fill_fraction: float = 0.50
+    promoted_execution_depth_haircut: float = 0.50
+    related_market_arb_enabled: bool = True
+    related_market_arb_min_edge_per_share: float = 0.0100
+    related_market_arb_max_notional_usdc: float = 25.0
+    validation_min_closed_trades: int = 500
+    validation_min_market_days: int = 30
+    validation_max_drawdown_fraction: float = 0.10
+    validation_max_single_market_profit_share: float = 0.10
 
     @classmethod
     def from_env(cls) -> "LatencyBotSettings":
@@ -475,6 +501,11 @@ class LatencyBotSettings:
                 ),
             ),
             promoted_variant_max_open_positions=_env_int("LATENCY_BOT_PROMOTED_VARIANT_MAX_OPEN_POSITIONS", 10),
+            promoted_execution_realism_enabled=os.getenv("LATENCY_BOT_PROMOTED_EXECUTION_REALISM_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            promoted_execution_latency_ms=_env_float("LATENCY_BOT_PROMOTED_EXECUTION_LATENCY_MS", 750.0),
+            promoted_execution_extra_slippage_per_share=_env_float("LATENCY_BOT_PROMOTED_EXECUTION_EXTRA_SLIPPAGE_PER_SHARE", 0.0030),
+            promoted_execution_partial_fill_fraction=_env_float("LATENCY_BOT_PROMOTED_EXECUTION_PARTIAL_FILL_FRACTION", 0.50),
+            promoted_execution_depth_haircut=_env_float("LATENCY_BOT_PROMOTED_EXECUTION_DEPTH_HAIRCUT", 0.50),
             complete_set_arb_enabled=os.getenv("LATENCY_BOT_COMPLETE_SET_ARB_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             complete_set_arb_min_profit_per_share=_env_float("LATENCY_BOT_COMPLETE_SET_ARB_MIN_PROFIT_PER_SHARE", 0.0025),
             complete_set_arb_slippage_per_share=_env_float("LATENCY_BOT_COMPLETE_SET_ARB_SLIPPAGE_PER_SHARE", 0.0010),
@@ -489,7 +520,7 @@ class LatencyBotSettings:
             live_complete_set_arb_pilot_enabled=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
             live_complete_set_arb_pilot_mode=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MODE", "dry_run").strip().lower(),
             live_complete_set_arb_pilot_confirm=os.getenv("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CONFIRM", ""),
-            live_complete_set_arb_pilot_capital_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CAPITAL_USDC", 50.0),
+            live_complete_set_arb_pilot_capital_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_CAPITAL_USDC", 25.0),
             live_complete_set_arb_pilot_notional_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_NOTIONAL_USDC", 5.0),
             live_complete_set_arb_pilot_min_edge_per_share=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_EDGE_PER_SHARE", 0.0100),
             live_complete_set_arb_pilot_min_depth_usdc=_env_float("LATENCY_BOT_LIVE_COMPLETE_SET_ARB_PILOT_MIN_DEPTH_USDC", 10.0),
@@ -540,7 +571,7 @@ class LatencyBotSettings:
             preowned_inventory_arb_per_asset_time_bucket_cap=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_PER_ASSET_TIME_BUCKET_CAP", 1),
             preowned_inventory_arb_time_bucket_seconds=_env_int("LATENCY_BOT_PREOWNED_INVENTORY_ARB_TIME_BUCKET_SECONDS", 300),
             preowned_inventory_arb_seed_require_original_eligible=os.getenv("LATENCY_BOT_PREOWNED_INVENTORY_ARB_SEED_REQUIRE_ORIGINAL_ELIGIBLE", "0").strip().lower() in {"1", "true", "yes", "on"},
-            cex_latency_paper_enabled=os.getenv("LATENCY_BOT_CEX_LATENCY_PAPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            cex_latency_paper_enabled=os.getenv("LATENCY_BOT_CEX_LATENCY_PAPER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
             cex_latency_paper_capital_usdc=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_CAPITAL_USDC", 1000.0),
             cex_latency_paper_notional_usdc=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_NOTIONAL_USDC", 50.0),
             cex_latency_paper_max_open_positions=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_MAX_OPEN_POSITIONS", 3),
@@ -559,7 +590,7 @@ class LatencyBotSettings:
             cex_latency_paper_exit_edge_floor=_env_float("LATENCY_BOT_CEX_LATENCY_PAPER_EXIT_EDGE_FLOOR", 0.0100),
             cex_latency_paper_force_exit_seconds=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_FORCE_EXIT_SECONDS", 30),
             cex_latency_paper_same_market_cooldown_seconds=_env_int("LATENCY_BOT_CEX_LATENCY_PAPER_SAME_MARKET_COOLDOWN_SECONDS", 300),
-            btc_fair_value_paper_enabled=os.getenv("LATENCY_BOT_BTC_FAIR_VALUE_PAPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            btc_fair_value_paper_enabled=os.getenv("LATENCY_BOT_BTC_FAIR_VALUE_PAPER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
             btc_fair_value_paper_capital_usdc=_env_float("LATENCY_BOT_BTC_FAIR_VALUE_PAPER_CAPITAL_USDC", 1000.0),
             btc_fair_value_paper_notional_usdc=_env_float("LATENCY_BOT_BTC_FAIR_VALUE_PAPER_NOTIONAL_USDC", 50.0),
             btc_fair_value_paper_max_open_positions=_env_int("LATENCY_BOT_BTC_FAIR_VALUE_PAPER_MAX_OPEN_POSITIONS", 3),
@@ -588,12 +619,22 @@ class LatencyBotSettings:
             temporal_inventory_maker_paper_min_net_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_NET_EDGE", 0.0200),
             temporal_inventory_maker_paper_max_pair_cost=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MAX_PAIR_COST", 0.9900),
             temporal_inventory_maker_paper_quote_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_QUOTE_TTL_SECONDS", 12),
+            temporal_inventory_maker_paper_high_edge_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_HIGH_EDGE_TTL_SECONDS", 30),
+            temporal_inventory_maker_paper_hedge_ttl_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_HEDGE_TTL_SECONDS", 45),
+            temporal_inventory_maker_paper_mid_aggressive_min_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MID_AGGRESSIVE_MIN_EDGE", 0.0400),
+            temporal_inventory_maker_paper_near_touch_min_edge=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_NEAR_TOUCH_MIN_EDGE", 0.0800),
+            temporal_inventory_maker_paper_min_fill_probability=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_FILL_PROBABILITY", 0.0300),
+            temporal_inventory_maker_paper_min_expected_value_usdc=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_MIN_EXPECTED_VALUE_USDC", 0.0100),
+            temporal_inventory_maker_paper_unpaired_timeout_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_UNPAIRED_TIMEOUT_SECONDS", 60),
             temporal_inventory_maker_paper_force_exit_seconds=_env_int("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_FORCE_EXIT_SECONDS", 20),
             temporal_inventory_maker_paper_daily_loss_limit_usdc=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_DAILY_LOSS_LIMIT_USDC", 25.0),
+            temporal_inventory_maker_paper_aggressive_quotes_enabled=os.getenv("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_AGGRESSIVE_QUOTES_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
+            temporal_inventory_maker_paper_queue_ahead_fraction=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_QUEUE_AHEAD_FRACTION", 0.75),
+            temporal_inventory_maker_paper_inventory_skew_per_share=_env_float("LATENCY_BOT_TEMPORAL_INVENTORY_MAKER_PAPER_INVENTORY_SKEW_PER_SHARE", 0.0010),
             live_temporal_inventory_maker_enabled=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
             live_temporal_inventory_maker_mode=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_MODE", "dry_run").strip().lower(),
             live_temporal_inventory_maker_confirm=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_CONFIRM", ""),
-            live_temporal_inventory_maker_capital_usdc=_env_float("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_CAPITAL_USDC", 50.0),
+            live_temporal_inventory_maker_capital_usdc=_env_float("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_CAPITAL_USDC", 25.0),
             live_temporal_inventory_maker_base_order_usdc=_env_float("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_BASE_ORDER_USDC", 5.0),
             live_temporal_inventory_maker_max_open_orders=_env_int("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_MAX_OPEN_ORDERS", 1),
             live_temporal_inventory_maker_max_orders_per_cycle=_env_int("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_MAX_ORDERS_PER_CYCLE", 1),
@@ -604,7 +645,8 @@ class LatencyBotSettings:
             live_temporal_inventory_maker_daily_loss_limit_usdc=_env_float("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_DAILY_LOSS_LIMIT_USDC", 5.0),
             live_temporal_inventory_maker_require_positive_paper_pnl=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_REQUIRE_POSITIVE_PAPER_PNL", "1").strip().lower() in {"1", "true", "yes", "on"},
             live_temporal_inventory_maker_require_reconciliation=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_REQUIRE_RECONCILIATION", "1").strip().lower() in {"1", "true", "yes", "on"},
-            late_resolution_capture_paper_enabled=os.getenv("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            live_temporal_inventory_maker_require_validation_gate=os.getenv("LATENCY_BOT_LIVE_TEMPORAL_INVENTORY_MAKER_REQUIRE_VALIDATION_GATE", "1").strip().lower() in {"1", "true", "yes", "on"},
+            late_resolution_capture_paper_enabled=os.getenv("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},
             late_resolution_capture_paper_capital_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_CAPITAL_USDC", 1000.0),
             late_resolution_capture_paper_notional_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_NOTIONAL_USDC", 25.0),
             late_resolution_capture_paper_max_market_exposure_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MAX_MARKET_EXPOSURE_USDC", 50.0),
@@ -614,6 +656,9 @@ class LatencyBotSettings:
             late_resolution_capture_paper_min_official_confidence=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_OFFICIAL_CONFIDENCE", 0.97),
             late_resolution_capture_paper_min_boundary_distance_bps=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_BOUNDARY_DISTANCE_BPS", 8.0),
             late_resolution_capture_paper_min_edge=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_EDGE", 0.0100),
+            late_resolution_capture_paper_min_depth_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_DEPTH_USDC", 50.0),
+            late_resolution_capture_paper_min_exit_bid=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MIN_EXIT_BID", 0.0500),
+            late_resolution_capture_paper_max_book_age_ms=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_MAX_BOOK_AGE_MS", 5000.0),
             late_resolution_capture_paper_daily_loss_limit_usdc=_env_float("LATENCY_BOT_LATE_RESOLUTION_CAPTURE_PAPER_DAILY_LOSS_LIMIT_USDC", 25.0),
             wallet_teacher_sniper_enabled=os.getenv("LATENCY_BOT_WALLET_TEACHER_SNIPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
             wallet_teacher_sniper_wallet=os.getenv(
@@ -683,6 +728,13 @@ class LatencyBotSettings:
             kalshi_api_key_id=os.getenv("LATENCY_BOT_KALSHI_API_KEY_ID", ""),
             kalshi_private_key_path=os.getenv("LATENCY_BOT_KALSHI_PRIVATE_KEY_PATH", ""),
             kalshi_private_key_pem=os.getenv("LATENCY_BOT_KALSHI_PRIVATE_KEY_PEM", ""),
+            related_market_arb_enabled=os.getenv("LATENCY_BOT_RELATED_MARKET_ARB_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"},
+            related_market_arb_min_edge_per_share=_env_float("LATENCY_BOT_RELATED_MARKET_ARB_MIN_EDGE_PER_SHARE", 0.0100),
+            related_market_arb_max_notional_usdc=_env_float("LATENCY_BOT_RELATED_MARKET_ARB_MAX_NOTIONAL_USDC", 25.0),
+            validation_min_closed_trades=_env_int("LATENCY_BOT_VALIDATION_MIN_CLOSED_TRADES", 500),
+            validation_min_market_days=_env_int("LATENCY_BOT_VALIDATION_MIN_MARKET_DAYS", 30),
+            validation_max_drawdown_fraction=_env_float("LATENCY_BOT_VALIDATION_MAX_DRAWDOWN_FRACTION", 0.10),
+            validation_max_single_market_profit_share=_env_float("LATENCY_BOT_VALIDATION_MAX_SINGLE_MARKET_PROFIT_SHARE", 0.10),
             shadow_variant_top_raw_pnl_count=_env_int("LATENCY_BOT_SHADOW_VARIANT_TOP_RAW_PNL_COUNT", 10),
             shadow_variant_dashboard_grid_limit=_env_int("LATENCY_BOT_SHADOW_VARIANT_DASHBOARD_GRID_LIMIT", 40),
             shadow_variant_dashboard_reason_limit=_env_int("LATENCY_BOT_SHADOW_VARIANT_DASHBOARD_REASON_LIMIT", 120),
