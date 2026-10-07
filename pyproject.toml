@@ -1,6 +1,6 @@
 [project]
 name = "polymarket-bot"
-version = "0.1.0"
+version = "1.0.0"
 description = "Paper-first prediction-market research engine with execution-realistic simulation and validation gates."
 readme = "README.md"
 license = "MIT"

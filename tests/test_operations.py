@@ -43,6 +43,8 @@ class OperationsToolingTest(unittest.TestCase):
         html = render_latency_bot_dashboard_html(state)
         self.assertEqual(state["status"]["runner_status"], "demo")
         self.assertIn("Strategy Truth", html)
+        self.assertIn("Deterministic demo data", html)
+        self.assertIn("no live-performance claim", html)
 
     def test_validation_report_keeps_live_gate_closed_without_reconciliation_sample(self) -> None:
         records = load_validation_records(Path(self.manifest["validation_path"]))
