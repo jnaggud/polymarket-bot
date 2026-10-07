@@ -10434,6 +10434,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("latency-bot-kalshi-arb-probe-cycle")
     latency_bot_summarize_parser = subparsers.add_parser("latency-bot-summarize")
     latency_bot_summarize_parser.add_argument("--minutes", type=int, default=60)
+    latency_bot_db_parser = subparsers.add_parser("latency-bot-db-maintain")
+    latency_bot_db_parser.add_argument("--retention-days", type=int, default=14)
+    latency_bot_db_parser.add_argument("--batch-size", type=int, default=25_000)
+    latency_bot_db_parser.add_argument("--archive-dir")
+    latency_bot_db_parser.add_argument("--apply", action="store_true")
+    latency_bot_db_parser.add_argument("--confirm", default="")
+    latency_bot_db_parser.add_argument("--checkpoint", action="store_true")
+    latency_bot_db_parser.add_argument("--vacuum", action="store_true")
+    latency_bot_db_parser.add_argument("--migrate", action="store_true")
+    latency_bot_demo_parser = subparsers.add_parser("latency-bot-create-demo")
+    latency_bot_demo_parser.add_argument("--output-dir", default="demo/runtime")
+    latency_bot_demo_parser.add_argument("--force", action="store_true")
+    latency_bot_validation_parser = subparsers.add_parser("latency-bot-validate")
+    latency_bot_validation_parser.add_argument("--input", required=True)
+    latency_bot_validation_parser.add_argument("--output")
     summarize_intraday_audit_parser = subparsers.add_parser("summarize-intraday-audit")
     summarize_intraday_audit_parser.add_argument("--minutes", type=int, default=60)
     summarize_intraday_lifecycle_parser = subparsers.add_parser("summarize-intraday-lifecycle")
@@ -10484,6 +10499,10 @@ def build_parser() -> argparse.ArgumentParser:
     latency_dashboard = subparsers.add_parser("serve-latency-bot-dashboard")
     latency_dashboard.add_argument("--host")
     latency_dashboard.add_argument("--port", type=int)
+    latency_demo_dashboard = subparsers.add_parser("serve-latency-bot-demo-dashboard")
+    latency_demo_dashboard.add_argument("--data-dir", default="demo/runtime")
+    latency_demo_dashboard.add_argument("--host")
+    latency_demo_dashboard.add_argument("--port", type=int, default=8091)
     return parser
 
 
@@ -10563,6 +10582,51 @@ def main() -> int:
             from latency_bot import LatencyBotSettings, latency_bot_summarize
 
             print(json.dumps(latency_bot_summarize(LatencyBotSettings.from_env(), args.minutes), indent=2))
+        elif args.command == "latency-bot-db-maintain":
+            from latency_bot import LatencyBotSettings
+            from latency_bot.maintenance import (
+                apply_retention,
+                checkpoint_database,
+                database_inventory,
+                retention_plan,
+                vacuum_database,
+            )
+            from latency_bot.storage import init_latency_bot_db
+
+            latency_settings = LatencyBotSettings.from_env()
+            result: dict[str, Any] = {}
+            if args.migrate:
+                result["migration"] = init_latency_bot_db(latency_settings)
+            result["inventory"] = database_inventory(latency_settings.db_path)
+            result["retention"] = retention_plan(
+                latency_settings.db_path,
+                retention_days=args.retention_days,
+                batch_size=args.batch_size,
+            )
+            if args.apply:
+                result["retention"] = apply_retention(
+                    latency_settings.db_path,
+                    retention_days=args.retention_days,
+                    batch_size=args.batch_size,
+                    archive_dir=Path(args.archive_dir) if args.archive_dir else latency_settings.db_path.parent / "archive",
+                    confirmation=args.confirm,
+                )
+            if args.checkpoint:
+                result["checkpoint"] = checkpoint_database(latency_settings.db_path)
+            if args.vacuum:
+                if not args.apply:
+                    parser.error("--vacuum requires --apply and --confirm RETENTION_APPLY")
+                result["vacuum"] = vacuum_database(latency_settings.db_path, confirmation=args.confirm)
+            print(json.dumps(result, indent=2))
+        elif args.command == "latency-bot-create-demo":
+            from latency_bot.demo import create_demo_workspace
+
+            print(json.dumps(create_demo_workspace(Path(args.output_dir), force=args.force), indent=2))
+        elif args.command == "latency-bot-validate":
+            from latency_bot.validation import write_validation_report
+
+            output_path = Path(args.output) if args.output else None
+            print(json.dumps(write_validation_report(Path(args.input), output_path), indent=2))
         elif args.command == "summarize-intraday-audit":
             print(json.dumps(summarize_intraday_audit(settings, args.minutes), indent=2))
         elif args.command == "summarize-intraday-lifecycle":
@@ -10627,6 +10691,19 @@ def main() -> int:
                 latency_settings,
                 host=args.host or latency_settings.dashboard_host,
                 port=args.port or latency_settings.dashboard_port,
+            )
+        elif args.command == "serve-latency-bot-demo-dashboard":
+            from latency_bot import LatencyBotSettings, serve_latency_bot_dashboard
+            from latency_bot.demo import create_demo_workspace, demo_settings
+
+            data_dir = Path(args.data_dir)
+            latency_settings = demo_settings(data_dir, LatencyBotSettings.from_env())
+            if not latency_settings.db_path.exists():
+                create_demo_workspace(data_dir)
+            serve_latency_bot_dashboard(
+                latency_settings,
+                host=args.host or "127.0.0.1",
+                port=args.port,
             )
         else:
             parser.error(f"unknown command {args.command}")

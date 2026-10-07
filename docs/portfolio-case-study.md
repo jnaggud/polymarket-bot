@@ -44,10 +44,29 @@ paper performance.
 The operations cockpit surfaces lifecycle events, blocked decisions, active versus archived strategies, execution
 assumptions, and validation reasons. A no-trade result remains visible instead of being silently discarded.
 
+### Make operational data bounded and reviewable
+
+High-frequency observations can outgrow a single-machine research ledger. The maintenance workflow inventories the
+database without scanning every row, previews retention through indexed timestamps, archives selected raw records to
+compressed JSON Lines, and deletes only bounded batches after an explicit confirmation. Trading and accounting
+evidence is outside the default retention boundary.
+
+### Turn strategy promotion into a repeatable report
+
+The validation report combines expanding-window out-of-sample folds, market-implied and no-trade baselines,
+fee/latency/depth/partial-fill stress bands, queue-probability calibration, and reconciliation against independently
+captured fills. A strategy remains paper-only when any evidence gate lacks enough observations or fails its threshold.
+
+### Provide a reviewer-safe walkthrough
+
+The demo generator creates an isolated SQLite ledger, market caches, status payload, and validation input with no
+credentials and no live orders. A reviewer can launch the full dashboard locally and reproduce the report from one
+documented command sequence.
+
 ## Verification
 
-- 146 deterministic tests cover research accounting, strategy selection, market lifecycles, execution models, live
-  preflight, validation gates, and dashboard rendering.
+- 151 deterministic tests cover research accounting, strategy selection, market lifecycles, execution models, live
+  preflight, validation gates, retention safety, demo generation, and dashboard rendering.
 - CI runs lint, command-line smoke checks, and the test suite on Python 3.10–3.13.
 - Tests treat deprecation and resource warnings as errors.
 - The committed environment template contains placeholders only; state, logs, databases, and secrets are ignored.
