@@ -10,7 +10,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "py-clob-client-v2>=0.1.0",
-    "websockets>=14.0",
+    "websockets>=16.1.1",
 ]
 keywords = ["polymarket", "prediction-markets", "paper-trading", "market-microstructure"]
 classifiers = [
