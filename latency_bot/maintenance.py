@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -179,7 +180,7 @@ def apply_retention(
         raise ValueError("retention_days and batch_size must be positive")
     operation_time = now or _utc_now()
     cutoff = _iso(operation_time - timedelta(days=retention_days))
-    stamp = operation_time.strftime("%Y%m%dT%H%M%SZ")
+    stamp = f"{operation_time.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
     connection = sqlite3.connect(db_path, timeout=30.0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 30000")
