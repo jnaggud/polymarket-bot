@@ -96,6 +96,25 @@ class OperationsToolingTest(unittest.TestCase):
         self.assertEqual(archive_lines[0]["_metadata"]["row_count"], 1)
         self.assertEqual(archive_lines[1]["asset"], "btc")
 
+        with closing(sqlite3.connect(self.settings.db_path)) as connection:
+            connection.execute(
+                "INSERT INTO binance_ticks (ts, asset, mid) VALUES (?, 'eth', 3000)",
+                (old_ts.isoformat().replace("+00:00", "Z"),),
+            )
+            connection.commit()
+        repeated = apply_retention(
+            self.settings.db_path,
+            retention_days=14,
+            batch_size=10,
+            archive_dir=self.root / "archive",
+            confirmation=RETENTION_CONFIRMATION,
+            now=self.anchor,
+        )
+        repeated_binance = next(item for item in repeated["tables"] if item["table"] == "binance_ticks")
+        self.assertNotEqual(binance["archive_path"], repeated_binance["archive_path"])
+        self.assertTrue(Path(binance["archive_path"]).exists())
+        self.assertTrue(Path(repeated_binance["archive_path"]).exists())
+
     def test_inventory_reports_versioned_schema(self) -> None:
         inventory = database_inventory(self.settings.db_path)
         self.assertEqual(inventory["schema_version"], 2)
