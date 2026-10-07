@@ -9,4 +9,6 @@ dist/
 data/
 logs/
 state/
+demo/runtime/
+reports/
 screenlog.*

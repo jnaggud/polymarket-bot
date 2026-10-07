@@ -110,6 +110,25 @@ python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
 Open `http://127.0.0.1:8090/?mode=fast`. The compact dashboard refreshes from
 `http://127.0.0.1:8090/api/state`; `?mode=full` retains the deeper research views.
 
+### Run the credential-free demo
+
+Generate a small deterministic ledger and launch a separate dashboard without venue credentials or live trades:
+
+```bash
+python3 main.py latency-bot-create-demo --output-dir demo/runtime
+python3 main.py serve-latency-bot-demo-dashboard --data-dir demo/runtime --port 8091
+```
+
+Open `http://127.0.0.1:8091/?mode=full`. The generator also writes `validation_records.json`, which exercises the
+same walk-forward, cost-sensitivity, baseline, queue-calibration, and fill-reconciliation report used for strategy
+review:
+
+```bash
+python3 main.py latency-bot-validate \
+  --input demo/runtime/validation_records.json \
+  --output reports/demo-validation.json
+```
+
 ## Core workflows
 
 | Command | Purpose |
@@ -124,6 +143,10 @@ Open `http://127.0.0.1:8090/?mode=fast`. The compact dashboard refreshes from
 | `daemon-latency-bot-engine` | Continuously run short-horizon discovery, simulation, and accounting. |
 | `serve-latency-bot-dashboard` | Serve the latency operations cockpit and JSON state endpoint. |
 | `latency-bot-summarize` | Print recent engine, signal, execution, and PnL diagnostics. |
+| `latency-bot-db-maintain` | Inspect schema/storage and preview bounded, archive-first retention. |
+| `latency-bot-create-demo` | Generate the credential-free dashboard and validation dataset. |
+| `latency-bot-validate` | Produce walk-forward, sensitivity, baseline, queue, and fill-reconciliation gates. |
+| `serve-latency-bot-demo-dashboard` | Serve an isolated demo ledger on a separate port. |
 
 Run `python3 main.py --help` for the full command list.
 
@@ -183,8 +206,30 @@ python3 -W error::DeprecationWarning -W error::ResourceWarning -m unittest disco
 python3 main.py --help >/dev/null
 ```
 
-The current suite contains 146 tests covering accounting, discovery, execution models, position lifecycles, risk
-gates, strategy epochs, live-pilot preflight, and dashboard rendering.
+The current suite contains 151 tests covering accounting, discovery, execution models, position lifecycles, risk
+gates, strategy epochs, live-pilot preflight, dashboard rendering, retention safety, demo generation, and validation.
+
+## Database operations
+
+The latency ledger can grow quickly because raw books and reference ticks are intentionally append-only. Inventory
+and retention are explicit operator actions:
+
+```bash
+# Constant-time size/schema inventory plus a bounded preview; no rows change.
+python3 main.py latency-bot-db-maintain --retention-days 14 --batch-size 25000
+
+# Apply one bounded batch per raw-data table, archiving every row before deletion.
+python3 main.py latency-bot-db-maintain \
+  --retention-days 14 \
+  --batch-size 25000 \
+  --apply \
+  --confirm RETENTION_APPLY
+```
+
+Orders, fills, positions, PnL events, equity, risk events, and reconciliation records are excluded from retention.
+Applying retention does not shrink the SQLite file immediately; schedule `--vacuum` only during a stopped-engine
+maintenance window after verifying the compressed archives. SQLite needs temporary free space roughly equal to the
+database size; the command refuses to start when the volume does not have a 10% safety margin.
 
 ## Project layout
 

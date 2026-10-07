@@ -67,6 +67,10 @@ The `latency_bot` package is organized by boundary:
 - `risk/` centralizes limits and eligibility decisions.
 - `execution/` models paper fills and contains separately guarded live clients.
 - `storage.py` owns the event ledger, migrations, summaries, and reconciliation data.
+- `maintenance.py` provides bounded, archive-first raw-data retention and storage diagnostics.
+- `validation.py` compares strategies with baselines and produces walk-forward, cost-sensitivity, queue-calibration,
+  and independent-fill gates.
+- `demo.py` produces an isolated credential-free ledger for reproducible review.
 - `strategy_truth.py` maps every strategy to an evidence tier and validation result.
 - `dashboard.py` renders operational state without recomputing or relabeling PnL.
 
@@ -99,3 +103,7 @@ order-level exposure and loss checks.
 
 Runtime evidence belongs under ignored `state/`, `data/`, and `logs/` directories. The repository contains only
 source code, safe configuration examples, public fixtures, documentation, and tests.
+
+The retention boundary deliberately separates reproducible raw observations from durable audit evidence. Old books,
+reference ticks, fair values, and signal rows may be archived in bounded batches. Orders, fills, positions, lifecycle
+events, PnL, risk events, and reconciliation records are never included in the default retention target set.

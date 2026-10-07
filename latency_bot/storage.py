@@ -14,6 +14,13 @@ from .config import LatencyBotSettings
 
 _SCHEMA = (
     """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS markets (
         market_id TEXT PRIMARY KEY,
         question TEXT NOT NULL,
@@ -1217,12 +1224,23 @@ def init_latency_bot_db(settings: LatencyBotSettings) -> dict[str, Any]:
         snapshot_count = int(conn.execute("SELECT COUNT(*) AS count FROM equity_snapshots").fetchone()["count"])
         if snapshot_count == 0:
             _rebuild_equity_snapshots(conn, settings)
+        migrated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (1, 'legacy_schema_baseline', ?)",
+            (migrated_at,),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (2, 'versioned_migration_ledger', ?)",
+            (migrated_at,),
+        )
+        conn.execute("PRAGMA user_version = 2")
         conn.commit()
     return {
         "db_path": str(settings.db_path),
         "deduped_live_closes": deduped_live_closes,
         "deduped_shadow_closes": deduped_shadow_closes,
         "tables_created": [
+            "schema_migrations",
             "markets",
             "binance_ticks",
             "polymarket_books",
