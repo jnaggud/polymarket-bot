@@ -1,169 +1,227 @@
-# Polymarket Bot Scaffold
+# Polymarket Research Engine
 
-This project builds the architecture from the X thread as a local, inspectable bot:
+[![CI](https://github.com/jnaggud/polymarket-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/jnaggud/polymarket-bot/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 
-- target-wallet discovery from `poly_data`-style CSV exports
-- market scanning via the official `polymarket` CLI
-- thesis generation through OpenAI
-- three-agent consensus
-- Kelly sizing
-- exit monitoring
-- local monitoring dashboard
-- paper-trading by default
+A paper-first prediction-market research system for market discovery, signal evaluation, execution-realistic
+simulation, strategy validation, and operational monitoring.
 
-## Important
+The project is designed around a simple rule: modeled edge is not the same as executable profit. Historical model
+results, queue-aware paper fills, observed rebates, and wallet-reconciled results are tracked separately so an
+optimistic simulation cannot silently qualify a strategy for live trading.
 
-As of April 22, 2026, Polymarket's own docs list the United States (`US`) as blocked for order placement. This repo therefore defaults to `paper` mode and refuses live trading when the geoblock endpoint reports the current IP is restricted.
+![Polymarket latency operations dashboard](docs/assets/latency-ops-dashboard.png)
 
-Relevant docs:
+_Dashboard shown with an isolated showcase ledger; figures are not live-performance claims._
 
-- Polymarket API overview: https://docs.polymarket.com/api-reference
-- Geographic restrictions: https://docs.polymarket.com/api-reference/geoblock
-- CLOB auth model: https://docs.polymarket.com/developers/proxy-wallet
-- Official CLI: https://github.com/Polymarket/polymarket-cli
-- `poly_data`: https://github.com/warproxxx/poly_data
+> [!IMPORTANT]
+> This repository is research software, not financial advice. Live trading is disabled by default. Eligibility,
+> credentials, venue rules, and regulatory requirements remain the operator's responsibility. The engine checks
+> Polymarket's geoblock endpoint before order placement and refuses live execution from restricted locations.
 
-## What This Bot Actually Does
+## Engineering highlights
 
-The X thread mixes real repos with pseudocode and leaves out important details. This scaffold keeps the usable parts:
+- **Execution-realistic paper fills** — VWAP book walking, latency decay, slippage, depth haircuts, fees, and partial
+  fills are modeled explicitly.
+- **Canonical strategy truth** — model PnL, executable-paper PnL, maker rebates, and wallet results are never merged
+  into one misleading headline.
+- **Epoch-aware experiments** — a changed execution model starts a new result epoch instead of inheriting historical
+  performance from incompatible assumptions.
+- **Queue-aware market making** — passive quotes track queue position, inventory skew, fill probability, adverse
+  selection, quote TTLs, and forced exits.
+- **Promotion gates** — minimum resolved trades, market-day coverage, drawdown, concentration, positive after-cost
+  PnL, and a positive lower 95% trade-EV bound are required before a live pilot can qualify.
+- **Defense in depth** — dry-run defaults, explicit confirmation values, geoblock checks, reconciliation, heartbeat,
+  daily-loss, exposure, cooldown, and stale-data gates protect order paths.
+- **Inspectable operations** — a compact dashboard exposes market flow, lifecycle events, active strategies,
+  execution assumptions, and validation blockers.
 
-1. `discover-targets`
-Reads a CSV and ranks wallets. If the CSV contains `profit`, `pnl`, `total_pnl`, or `win_rate`, those are used. Otherwise it falls back to activity-based ranking so you still get a target list.
+## Architecture
 
-2. `refresh-target-activity`
-Pulls recent trades for the target wallets through the official CLI and normalizes them into a local cache.
-
-3. `scan`
-Lists active markets, fetches midpoint and book depth, filters by liquidity and time-to-resolution, and writes a queue.
-
-4. `brain`
-Calls OpenAI with a structured JSON prompt and asks for probability, confidence, thesis, catalysts, and crowd-error framing.
-
-5. `trade`
-Runs three votes:
-- convergence: thesis probability vs current midpoint
-- whale copy: target-wallet activity on the same token/market
-- microstructure: order-book imbalance and spread
-
-6. `monitor-exits`
-Checks target-hit, order-flow spike proxy, and stale-thesis exits.
-
-## Setup
-
-1. Install the official CLI.
-
-```bash
-brew tap Polymarket/polymarket-cli https://github.com/Polymarket/polymarket-cli
-brew install polymarket
+```mermaid
+flowchart LR
+    A[Market and wallet feeds] --> B[Discovery and normalization]
+    B --> C[Fair value and signal models]
+    C --> D[Risk and eligibility gates]
+    D --> E[Execution simulator]
+    E --> F[(SQLite event ledger)]
+    F --> G[Strategy Truth registry]
+    G --> H[Validation gates]
+    F --> I[Latency operations dashboard]
+    H --> J{Live pilot eligible?}
+    J -->|No| K[Paper / dry-run only]
+    J -->|Yes + explicit operator confirmation| L[Guarded order client]
 ```
 
-2. Copy the env file.
+The repository contains two related workflows:
+
+1. **Research pipeline** — discovers markets and public-wallet activity, produces optional structured theses,
+   evaluates consensus and microstructure signals, sizes paper positions, and monitors exits.
+2. **Latency engine** — tracks short-horizon crypto markets, evaluates directional and complete-set opportunities,
+   simulates maker/taker execution, and records every decision in an auditable event ledger.
+
+See [Architecture](docs/architecture.md) for component boundaries and data flow, and the
+[engineering case study](docs/portfolio-case-study.md) for the design decisions behind the project.
+
+## Quick start
+
+### Requirements
+
+- Python 3.10 or newer
+- macOS, Linux, or Windows
+- The [official Polymarket CLI](https://github.com/Polymarket/polymarket-cli) for CLI-backed discovery workflows
+
+### Install
 
 ```bash
+git clone https://github.com/jnaggud/polymarket-bot.git
+cd polymarket-bot
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-3. Run one cycle in paper mode.
+The committed configuration contains placeholders only. Keep `.env`, private keys, API credentials, state databases,
+and logs out of version control.
+
+### Run one paper cycle
 
 ```bash
 python3 main.py cycle
 ```
 
-## Commands
-
-```bash
-python3 main.py discover-targets --leaderboard
-python3 main.py discover-targets --csv /path/to/trades.csv
-python3 main.py refresh-target-activity
-python3 main.py scan
-python3 main.py brain
-python3 main.py trade
-python3 main.py monitor-exits
-python3 main.py cycle
-python3 main.py daemon --interval 300
-python3 main.py serve-dashboard --host 127.0.0.1 --port 8080
-```
-
-## 24/7 Local Run
+### Run the latency engine and cockpit
 
 Terminal 1:
 
 ```bash
-python3 main.py daemon --interval 300
+python3 main.py daemon-latency-bot-engine --interval 10
 ```
 
 Terminal 2:
 
 ```bash
-python3 main.py serve-dashboard
-```
-
-Then open `http://127.0.0.1:8080`.
-
-Or use the helper scripts:
-
-```bash
-./scripts/start_bot_bg.sh
-./scripts/start_dashboard_bg.sh
-./scripts/status_local.sh
-./scripts/stop_local.sh
-```
-
-If a background process exits immediately, the start script now prints the last log lines instead of leaving a misleading PID file behind.
-
-## Latency Bot Cockpit
-
-The paper-first latency engine is separate from the original scanner/trader loop. It tracks short-horizon crypto markets, runs the temporal inventory maker and late-resolution paper models, and keeps every live maker action behind dry-run, reconciliation, heartbeat, and PnL gates.
-
-Run the engine and cockpit directly:
-
-```bash
-python3 main.py daemon-latency-bot-engine --interval 10
 python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
 ```
 
-Then open `http://127.0.0.1:8090`. The cockpit also exposes its compact refresh payload at `http://127.0.0.1:8090/api/state`.
+Open `http://127.0.0.1:8090/?mode=fast`. The compact dashboard refreshes from
+`http://127.0.0.1:8090/api/state`; `?mode=full` retains the deeper research views.
 
-### Reload the latency dashboard after a code update
+## Core workflows
 
-The browser auto-refreshes data, but Python code changes require restarting the dashboard process. In the terminal running the dashboard, press `Ctrl-C`, then run:
+| Command | Purpose |
+| --- | --- |
+| `discover-targets` | Rank public wallet activity from a leaderboard or normalized CSV export. |
+| `refresh-target-activity` | Refresh and normalize recent activity for the research watchlist. |
+| `scan` | Filter active markets by liquidity, spread, category, and resolution horizon. |
+| `brain` | Generate an optional structured thesis through the configured OpenAI model. |
+| `trade` | Evaluate convergence, wallet activity, and order-book microstructure votes. |
+| `monitor-exits` | Apply target, stale-thesis, rotation, and de-risk exit rules. |
+| `cycle` | Run the end-to-end paper research loop. |
+| `daemon-latency-bot-engine` | Continuously run short-horizon discovery, simulation, and accounting. |
+| `serve-latency-bot-dashboard` | Serve the latency operations cockpit and JSON state endpoint. |
+| `latency-bot-summarize` | Print recent engine, signal, execution, and PnL diagnostics. |
+
+Run `python3 main.py --help` for the full command list.
+
+## Strategy Truth
+
+The dashboard's **Strategy Truth** view is the canonical strategy comparison surface. Each row declares an execution
+tier and selects only the PnL that belongs to that tier:
+
+| Tier | Meaning | Promotion eligible |
+| --- | --- | --- |
+| `optimistic_simulation` | Historical or non-atomic fills retained for research. | No |
+| `shadow` | Signals observed without claiming executable fills. | No |
+| `executable_paper` | After-cost paper results using explicit execution assumptions. | Gate-dependent |
+| `live_cash` | Reconciled venue/wallet outcomes. | Already live |
+
+The promoted ETH/BTC five-minute directional variants use the `vwap_latency_partial_fill_v1` execution epoch. Older
+top-of-book results remain visible in the archive but cannot pass the live gate.
+
+## Safety model
+
+The default configuration is intentionally conservative:
+
+- `BOT_MODE=paper`
+- `LIVE_TRADING_ENABLED=false`
+- live pilots disabled and set to `dry_run`
+- explicit confirmation strings required for live paths
+- private-key and API credential fields blank
+- live temporal maker requires positive paper PnL, reconciliation, and a passed validation gate
+- stale books, insufficient depth, daily losses, excessive exposure, and restricted geography block execution
+
+Do not weaken those defaults in a committed file. If you experiment with live connectivity, use a separate low-value
+account, confirm venue eligibility, and independently review every risk limit.
+
+## Configuration
+
+[`.env.example`](.env.example) documents the available settings. The main groups are:
+
+- discovery, liquidity, and resolution-horizon filters
+- paper bankroll and portfolio limits
+- promoted directional variant definitions
+- realistic fill, latency, depth, and fee assumptions
+- temporal inventory-maker quoting and risk controls
+- complete-set and related-market research
+- live-pilot confirmations and credentials
+- validation thresholds and dashboard limits
+
+OpenAI is optional. Without `OPENAI_API_KEY`, the system skips predictive thesis generation instead of inventing a
+model estimate.
+
+## Verification
+
+Run the same checks used in CI:
 
 ```bash
-python3 main.py serve-latency-bot-dashboard --host 127.0.0.1 --port 8090
+ruff check .
+python3 -W error::DeprecationWarning -W error::ResourceWarning -m unittest discover -s tests
+python3 main.py --help >/dev/null
 ```
 
-Reload `http://127.0.0.1:8090` with `Cmd-Shift-R` on macOS (`Ctrl-Shift-R` on Windows/Linux). If the latency engine was also running while configuration changed, restart its terminal too:
+The current suite contains 146 tests covering accounting, discovery, execution models, position lifecycles, risk
+gates, strategy epochs, live-pilot preflight, and dashboard rendering.
 
-```bash
-python3 main.py daemon-latency-bot-engine --interval 10
+## Project layout
+
+```text
+bot/                 research pipeline, accounting, configuration, and dashboard
+latency_bot/         feeds, signal models, execution models, storage, risk, and cockpit
+scripts/             local process and diagnostic helpers
+tests/               deterministic unit and integration-style tests
+config/              public, non-secret research fixtures
+docs/                architecture, research notes, and portfolio case study
+main.py              command-line entry point
 ```
 
-Use the **Strategy Truth** tab for canonical comparisons. It separates legacy/model PnL, execution-realistic paper PnL, observed maker rebates, and wallet-reconciled PnL. `not loaded in fast mode` means a historical pane was intentionally skipped; it does not mean zero. `?mode=full` remains available for deep research, but the truth table is calculated in fast mode.
+## Limitations
 
-New promoted trades start a separate `vwap_latency_partial_fill_v1` epoch. Historical top-of-book fills remain visible as legacy simulation and cannot pass the live gate. CEX latency, BTC fair value, late capture, and aggressive temporal quotes default to disabled. Live pilots remain disabled/dry-run and are capped at small notional until the 500-trade, 30-market-day, drawdown, concentration, and 95% EV validation gate passes.
+- Paper fills are models, not guarantees of venue execution.
+- Latency, queue priority, partial fills, cancellations, and outages can differ materially from configured
+  assumptions.
+- Historical PnL does not predict future performance.
+- Public-wallet activity can be delayed, incomplete, or economically ambiguous.
+- Multi-leg opportunities carry legging and settlement risk unless execution is truly atomic.
+- The codebase is an active research system and has not been independently audited for production trading.
 
-The temporal maker, guarded live-maker, and late-resolution settings are documented in `.env.example`. Live maker trading defaults to disabled and `dry_run`; do not add credentials or change the live confirmation gates in a committed file.
+See the [roadmap](ROADMAP.md) for the remaining validation, execution, and operations work.
 
-Run the repository test suite with:
+## References
 
-```bash
-python3 -m unittest discover -s tests
-```
+- [Polymarket API overview](https://docs.polymarket.com/getting-started/api)
+- [Polymarket geographic restrictions](https://docs.polymarket.com/api-reference/geoblock)
+- [Polymarket official CLI](https://github.com/Polymarket/polymarket-cli)
+- [`poly_data`](https://github.com/warproxxx/poly_data) public market-data tooling
 
-## `poly_data` Notes
+## Contributing and security
 
-The public `poly_data` README documents `processed/trades.csv` fields like:
+Contributions are welcome through focused pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md). Please report
+security issues privately as described in [SECURITY.md](SECURITY.md).
 
-- `timestamp`
-- `market_id`
-- `maker`
-- `taker`
-- `price`
-- `usd_amount`
-- `token_amount`
+## License
 
-It does not document a built-in `profit` column. If your local export does include realized PnL fields, this bot will use them. If it does not, wallet ranking falls back to activity/notional so you can still build a watchlist instead of pretending the PnL is available when it isn't.
-
-## Startup Script
-
-See [scripts/run_cycle.sh](/Users/jeffersonduggan/dev/polymarket/scripts/run_cycle.sh) for a simple cron or `systemd` entrypoint.
+Released under the [MIT License](LICENSE).

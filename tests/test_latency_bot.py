@@ -2445,7 +2445,7 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             with patch("latency_bot.core.refresh_polymarket_cache", return_value=polymarket_cache), patch(
                 "latency_bot.core.refresh_binance_cache", return_value=binance_cache
             ), patch("latency_bot.core.build_fair_values", return_value=fair_values):
-                result = latency_bot_engine_cycle(settings)
+                latency_bot_engine_cycle(settings)
             self.assertEqual(len(load_open_orders(settings)), 1)
             self.assertEqual(len(load_open_positions(settings)), 0)
 
@@ -2548,7 +2548,7 @@ class LatencyBotScaffoldTest(unittest.TestCase):
             with patch("latency_bot.core.refresh_polymarket_cache", return_value=second_polymarket_cache), patch(
                 "latency_bot.core.refresh_binance_cache", return_value=binance_cache
             ), patch("latency_bot.core.build_fair_values", return_value=fair_values):
-                result = latency_bot_engine_cycle(settings)
+                latency_bot_engine_cycle(settings)
             self.assertEqual(len(load_open_orders(settings)), 0)
             self.assertIn(len(load_open_positions(settings)), {0, 1})
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 import html
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from bot.accounting import dedupe_closed_trades, rebuild_closed_trades
+from bot.accounting import rebuild_closed_trades
 from bot.config import Settings
 
 
@@ -83,8 +84,7 @@ def _sqlite_intraday_audit_summary(path: Path, lookback_minutes: int = 60) -> di
         }
     since = (datetime.now(timezone.utc) - timedelta(minutes=max(int(lookback_minutes), 1))).isoformat().replace("+00:00", "Z")
     try:
-        conn = sqlite3.connect(path)
-        with conn:
+        with closing(sqlite3.connect(path)) as conn, conn:
             ws = conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(recorded_at), '') FROM ws_events WHERE recorded_at >= ?",
                 (since,),
@@ -379,8 +379,7 @@ def _sqlite_btc_5m_decision_table(path: Path, lookback_minutes: int = 60) -> dic
     since = (datetime.now(timezone.utc) - timedelta(minutes=max(int(lookback_minutes), 1))).isoformat().replace("+00:00", "Z")
     rows: list[dict[str, Any]] = []
     try:
-        conn = sqlite3.connect(path)
-        with conn:
+        with closing(sqlite3.connect(path)) as conn, conn:
             for fill_probability in fill_probabilities:
                 row: dict[str, Any] = {"fill_probability": fill_probability}
                 for fee_label, fee_per_share in fee_scenarios:
@@ -438,9 +437,8 @@ def _sqlite_intraday_lifecycle_summary(path: Path, limit: int = 8) -> dict[str, 
             "recent_updown_markets": [],
         }
     try:
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        with conn:
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
             totals = conn.execute(
                 """
                 SELECT
@@ -494,6 +492,21 @@ def _sqlite_intraday_lifecycle_summary(path: Path, limit: int = 8) -> dict[str, 
             "latest_updown_seen_at": None,
             "recent_updown_markets": [],
         }
+    return {
+        "db_exists": True,
+        "total_markets": int(totals["total_markets"] or 0),
+        "updown_markets": int(totals["updown_markets"] or 0),
+        "threshold_markets": int(totals["threshold_markets"] or 0),
+        "updown_sub_60m_markets": int(totals["updown_sub_60m_markets"] or 0),
+        "updown_sub_15m_markets": int(totals["updown_sub_15m_markets"] or 0),
+        "updown_imminent_transition_markets": int(totals["updown_imminent_transition_markets"] or 0),
+        "threshold_sub_60m_markets": int(totals["threshold_sub_60m_markets"] or 0),
+        "best_updown_combined_contract_price": _as_float(edge["best_updown_combined_contract_price"], 0.0),
+        "best_updown_gross_edge_per_share": _as_float(edge["best_updown_gross_edge_per_share"], 0.0),
+        "best_updown_net_edge_per_share": _as_float(edge["best_updown_net_edge_per_share"], 0.0),
+        "latest_updown_seen_at": str(edge["latest_updown_seen_at"] or "") or None,
+        "recent_updown_markets": [dict(row) for row in recent_updown],
+    }
 
 
 def _sqlite_intraday_discovery_summary(path: Path, limit: int = 5) -> dict[str, Any]:
@@ -509,9 +522,8 @@ def _sqlite_intraday_discovery_summary(path: Path, limit: int = 5) -> dict[str, 
             "recent_near_term_markets": [],
         }
     try:
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        with conn:
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
             latest = conn.execute(
                 "SELECT batch_id, recorded_at FROM discovery_comparator_runs ORDER BY recorded_at DESC LIMIT 1"
             ).fetchone()
@@ -623,23 +635,6 @@ def _sqlite_intraday_discovery_summary(path: Path, limit: int = 5) -> dict[str, 
         "imminent_overlap_count": int(imminent_overlap or 0),
         "recent_near_term_markets": [dict(row) for row in near_rows],
     }
-    return {
-        "db_exists": True,
-        "total_markets": int(totals["total_markets"] or 0),
-        "updown_markets": int(totals["updown_markets"] or 0),
-        "threshold_markets": int(totals["threshold_markets"] or 0),
-        "updown_sub_60m_markets": int(totals["updown_sub_60m_markets"] or 0),
-        "updown_sub_15m_markets": int(totals["updown_sub_15m_markets"] or 0),
-        "updown_imminent_transition_markets": int(totals["updown_imminent_transition_markets"] or 0),
-        "threshold_sub_60m_markets": int(totals["threshold_sub_60m_markets"] or 0),
-        "best_updown_combined_contract_price": _as_float(edge["best_updown_combined_contract_price"], 0.0),
-        "best_updown_gross_edge_per_share": _as_float(edge["best_updown_gross_edge_per_share"], 0.0),
-        "best_updown_net_edge_per_share": _as_float(edge["best_updown_net_edge_per_share"], 0.0),
-        "latest_updown_seen_at": str(edge["latest_updown_seen_at"] or "") or None,
-        "recent_updown_markets": [dict(row) for row in recent_updown],
-    }
-
-
 def _fmt_money(value: float) -> str:
     return f"${value:,.2f}"
 
@@ -1282,7 +1277,6 @@ def build_dashboard_state(settings: Settings) -> dict[str, Any]:
     intraday_lifecycle_summary = _sqlite_intraday_lifecycle_summary(settings.intraday_registry_audit_sqlite_path, 8)
     intraday_discovery_summary = _sqlite_intraday_discovery_summary(settings.intraday_registry_audit_sqlite_path, 8)
 
-    closed = dedupe_closed_trades(trades)
     rebuilt_closes = rebuild_closed_trades(trades)
     corrected_close_by_position = {
         str(trade.get("position_id", "")): trade

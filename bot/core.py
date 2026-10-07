@@ -16,14 +16,14 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from bot.accounting import dedupe_closed_trades, effective_position_shares, position_mark, realized_pnl_from_trades, side_contract_price
+from bot.accounting import effective_position_shares, position_mark, realized_pnl_from_trades, side_contract_price
 from bot.config import Settings
 from bot.dashboard import serve_dashboard
 from bot.models import MarketCandidate, Position, Thesis, Vote, utc_now_iso
@@ -140,7 +140,7 @@ def _json_load(path: Path, default: Any) -> Any:
     return payloads[-1] if payloads else default
 
 
-def _intraday_audit_connect(settings: Settings) -> sqlite3.Connection:
+def _open_intraday_audit_connection(settings: Settings) -> sqlite3.Connection:
     path = settings.intraday_registry_audit_sqlite_path
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -462,6 +462,19 @@ def _intraday_audit_connect(settings: Settings) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_lifecycle_first_sub_60m_at ON market_lifecycle(first_sub_60m_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_lifecycle_first_sub_15m_at ON market_lifecycle(first_sub_15m_at)")
     return conn
+
+
+@contextmanager
+def _intraday_audit_connect(settings: Settings) -> Iterator[sqlite3.Connection]:
+    conn = _open_intraday_audit_connection(settings)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _record_intraday_audit_ws_events(settings: Settings, entries: list[dict[str, Any]]) -> None:
@@ -4551,6 +4564,10 @@ def _low_price_liquidity_factor(contract_price: float) -> float:
     return max(0.05, price / 0.10)
 
 
+def _complement_contract_price(price: float) -> float:
+    return 1.0 - price
+
+
 def _book_contract_levels(book: dict[str, Any], side: str, action: str) -> list[tuple[float, float]]:
     side = str(side).upper()
     action = str(action).lower()
@@ -4560,16 +4577,16 @@ def _book_contract_levels(book: dict[str, Any], side: str, action: str) -> list[
 
     if side == "BUY" and action == "open":
         source = asks
-        transform = lambda price: price
+        transform = float
     elif side == "BUY" and action == "close":
         source = bids
-        transform = lambda price: price
+        transform = float
     elif side == "SELL" and action == "open":
         source = bids
-        transform = lambda price: 1.0 - price
+        transform = _complement_contract_price
     else:
         source = asks
-        transform = lambda price: 1.0 - price
+        transform = _complement_contract_price
 
     for level in source:
         yes_price = _as_float(_first(level, "price", default=0.0))
@@ -4595,10 +4612,10 @@ def _passive_book_contract_levels(book: dict[str, Any], side: str) -> list[tuple
 
     if side == "BUY":
         source = bids
-        transform = lambda price: price
+        transform = float
     else:
         source = asks
-        transform = lambda price: 1.0 - price
+        transform = _complement_contract_price
 
     for level in source:
         yes_price = _as_float(_first(level, "price", default=0.0))
@@ -6015,7 +6032,7 @@ def _openai_request(settings: Settings, prompt: str) -> Thesis | None:
             try:
                 parsed = json.loads(text)
                 break
-            except json.JSONDecodeError as exc:
+            except json.JSONDecodeError:
                 last_error = RuntimeError(f"OpenAI response was not valid JSON: {text[:200]}")
                 continue
         reason = _first(data.get("incomplete_details", {}), "reason", default="unknown")
@@ -8287,8 +8304,6 @@ def run_crypto_5m_sniper_ab_cycle(settings: Settings, cli: PolymarketCLI) -> dic
     open_lookup = _market_open_lookup(existing_positions)
     decisions: list[dict[str, Any]] = []
     opened_positions: list[dict[str, Any]] = []
-    probation_max_open = max(int(settings.strategy_probation_max_open_positions), 0) if health_gate.get("probation_allowed") else 0
-    probation_size_multiplier = max(min(float(settings.strategy_probation_size_multiplier), 1.0), 0.0) if health_gate.get("probation_allowed") else 1.0
     if health_gate["blocked"]:
         marks = mark_open_positions(shadow_settings, intraday_cli)
         return {
@@ -8630,6 +8645,8 @@ def run_crypto_next_window_sniper_ab_cycle(settings: Settings, cli: PolymarketCL
     open_lookup = _market_open_lookup(existing_positions)
     decisions: list[dict[str, Any]] = []
     opened_positions: list[dict[str, Any]] = []
+    probation_max_open = max(int(settings.strategy_probation_max_open_positions), 0) if health_gate.get("probation_allowed") else 0
+    probation_size_multiplier = max(min(float(settings.strategy_probation_size_multiplier), 1.0), 0.0) if health_gate.get("probation_allowed") else 1.0
     if health_gate["blocked"]:
         marks = mark_open_positions(shadow_settings, intraday_cli)
         return {
@@ -10379,7 +10396,9 @@ def run_daemon(settings: Settings, cli: PolymarketCLI, interval_seconds: int | N
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Polymarket bot scaffold")
+    parser = argparse.ArgumentParser(
+        description="Paper-first prediction-market research and execution simulation engine"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     discover = subparsers.add_parser("discover-targets")
