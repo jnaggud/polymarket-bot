@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from bot.core import PolymarketCLI
@@ -44,7 +44,6 @@ from .storage import (
     init_latency_bot_db,
     latency_bot_portfolio_summary,
     latency_bot_shadow_portfolio_summary,
-    latest_rows,
     load_open_orders,
     load_open_positions,
     record_engine_cycle,

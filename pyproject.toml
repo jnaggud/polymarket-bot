@@ -1,12 +1,54 @@
 [project]
 name = "polymarket-bot"
 version = "0.1.0"
-description = "Paper-first Polymarket bot scaffold with scanning, thesis generation, consensus, and exit monitoring."
+description = "Paper-first prediction-market research engine with execution-realistic simulation and validation gates."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Jefferson Duggan", email = "jnaggud@gmail.com" },
+]
 requires-python = ">=3.10"
 dependencies = [
     "py-clob-client-v2>=0.1.0",
+    "websockets>=14.0",
+]
+keywords = ["polymarket", "prediction-markets", "paper-trading", "market-microstructure"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
 ]
 
+[project.scripts]
+polymarket-bot = "bot.core:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/jnaggud/polymarket-bot"
+Repository = "https://github.com/jnaggud/polymarket-bot"
+Issues = "https://github.com/jnaggud/polymarket-bot/issues"
+
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bot*", "latency_bot*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
