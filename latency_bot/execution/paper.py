@@ -1809,7 +1809,6 @@ def run_shadow_btc_no_paper_cycle(
     latest_books = load_latest_polymarket_books(settings, [str(item.get("market_id") or "") for item in open_positions])
     opened: list[dict[str, Any]] = []
     closed: list[dict[str, Any]] = []
-    open_by_market = {str(item.get("market_id") or ""): item for item in open_positions}
 
     for position in open_positions:
         market_id = str(position.get("market_id") or "")

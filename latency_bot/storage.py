@@ -7,7 +7,6 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterator
 
 from .config import LatencyBotSettings
@@ -4848,7 +4847,6 @@ def latency_bot_performance_stats(settings: LatencyBotSettings) -> dict[str, Any
             if pnl > 0:
                 bucket["wins"] += 1.0
     closes_desc = closes
-    closes_asc = list(reversed(closes_desc))
     current_streak_direction = "flat"
     current_streak_length = 0
     for row in closes_desc:
@@ -5137,7 +5135,6 @@ def latency_bot_promoted_variant_performance_stats(
 
 def latency_bot_complete_set_arb_stats(settings: LatencyBotSettings) -> dict[str, Any]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_ts = cutoff.isoformat().replace("+00:00", "Z")
     with connect_latency_bot_db(settings) as conn:
         signal_rows = conn.execute(
             """
@@ -5582,7 +5579,6 @@ def latency_bot_cex_latency_paper_stats(settings: LatencyBotSettings) -> dict[st
 def latency_bot_wallet_teacher_sniper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
     mode = "wallet_teacher_sniper"
     cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
     cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
     capital = max(float(settings.wallet_teacher_sniper_capital_usdc), 0.0)
     with connect_latency_bot_db(settings) as conn:
@@ -6013,7 +6009,6 @@ def latency_bot_realistic_complete_set_arb_sim(settings: LatencyBotSettings) -> 
 def latency_bot_btc_fair_value_paper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
     mode = "btc_fair_value_paper"
     cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
     cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
     capital = max(float(settings.btc_fair_value_paper_capital_usdc), 0.0)
     with connect_latency_bot_db(settings) as conn:
@@ -6529,7 +6524,6 @@ def latency_bot_live_temporal_inventory_maker_stats(settings: LatencyBotSettings
 
 def latency_bot_late_resolution_capture_paper_stats(settings: LatencyBotSettings) -> dict[str, Any]:
     cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_24h_ts = cutoff_24h.isoformat().replace("+00:00", "Z")
     cutoff_60m_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
     capital = max(float(settings.late_resolution_capture_paper_capital_usdc), 0.0)
     with connect_latency_bot_db(settings) as conn:
