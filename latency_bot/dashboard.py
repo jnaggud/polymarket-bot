@@ -392,6 +392,18 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     .cockpit * { box-sizing: border-box; }
+    .demo-banner {
+      display: none;
+      padding: 10px 14px;
+      border-bottom: 1px solid #f2c46d;
+      background: #fff7df;
+      color: #713f12;
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .demo-banner.visible { display: block; }
     .ops-shell {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -706,6 +718,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         </div>
         <div class="ops-clock" id="ops-clock">--:--:--</div>
       </div>
+      <div class="demo-banner" id="demo-banner">Deterministic demo data — no live orders and no live-performance claim</div>
       <div class="ops-tape" id="ops-tape"></div>
       <div class="ops-hero">
         <div class="hero-card">
@@ -884,8 +897,9 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         const basketStats = basket.timeframes?.all || {};
         const counts = data.counts || {};
         const assets = assetAggregates(data.markets?.items || []).slice(0, 3);
+        const isDemo = data.status?.runner_status === "demo";
         const items = [
-          ["LIVE", `${data.status?.runner_status || "unknown"} / ${data.status?.phase || "-"}`],
+          [isDemo ? "DEMO" : "LIVE", `${data.status?.runner_status || "unknown"} / ${data.status?.phase || "-"}`],
           ["BASKET PNL", money(basketStats.net_pnl_usdc || 0), n(basketStats.net_pnl_usdc || 0)],
           ["TEMP PNL", money(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0), n(temporal.marked_pnl_usdc || temporal.realized_pnl_usdc || 0)],
           ["LIVE MAKER", `${live.pilot_mode || "dry_run"} / ${num(live.dry_run_24h || 0)} dry`, 0],
@@ -903,6 +917,9 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         const leader = basket.enabled ? basket : (truthRows.sort((a, b) => n(b.timeframes?.all?.net_pnl_usdc) - n(a.timeframes?.all?.net_pnl_usdc))[0] || {});
         const leaderStats = leader.timeframes?.all || {};
         setText("ops-clock", new Date().toLocaleTimeString([], { hour12: false }));
+        const isDemo = data.status?.runner_status === "demo";
+        const demoBanner = $("demo-banner");
+        if (demoBanner) demoBanner.className = isDemo ? "demo-banner visible" : "demo-banner";
         setText("hero-equity", money(leaderStats.net_pnl_usdc || 0));
         setHTML("hero-realized", `<span class="${posClass(leaderStats.net_pnl_usdc)}">${money(leaderStats.net_pnl_usdc || 0)}</span>`);
         setText("hero-marked", num(leaderStats.closed || 0));
@@ -929,7 +946,7 @@ def _render_interactive_cockpit(state: dict[str, Any]) -> str:
         if (graphBadge) {
           const stale = Boolean(data.status?.last_error);
           graphBadge.className = badgeClass(!stale, false);
-          graphBadge.textContent = stale ? "ERROR" : "LIVE";
+          graphBadge.textContent = stale ? "ERROR" : (isDemo ? "DEMO" : "LIVE");
         }
       }
       function renderTruth(data) {
@@ -1869,6 +1886,14 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     fast_mode = bool(state.get("fast_mode"))
     served_from_cache = bool(state.get("served_from_cache"))
     status = state.get("status", {}) if isinstance(state.get("status"), dict) else {}
+    is_demo = status.get("runner_status") == "demo"
+    demo_disclosure_html = (
+        '<div class="demo-disclosure"><strong>Deterministic demo data.</strong> '
+        "No venue credentials or live orders are present, and displayed PnL is not a live-performance claim.</div>"
+        if is_demo
+        else ""
+    )
+    live_performance_heading = "Deterministic Demo Performance" if is_demo else "Live Performance"
     run_metadata = state.get("run_metadata", {}) if isinstance(state.get("run_metadata"), dict) else {}
     last_cycle_result = status.get("last_cycle_result", {}) if isinstance(status.get("last_cycle_result"), dict) else {}
     execution_result = last_cycle_result.get("execution", {}) if isinstance(last_cycle_result.get("execution"), dict) else {}
@@ -4112,6 +4137,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     ul {{ margin: 0; padding-left: 18px; }}
     .meta {{ color: #64748b; margin-bottom: 16px; }}
     .meta strong {{ color: #0f172a; }}
+    .demo-disclosure {{ margin: 0 0 16px; padding: 12px 14px; border: 1px solid #f2c46d; border-radius: 10px; background: #fff7df; color: #713f12; }}
     .sub {{ color: #64748b; }}
     .curve {{ width: 100%; height: auto; display: block; }}
     .curve-grid {{ stroke: #e2e8f0; stroke-width: 1; }}
@@ -4125,6 +4151,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
 <body>
   <h1>Latency Bot</h1>
   <div class="meta">Paper-only BTC/ETH/SOL short-horizon latency bot scaffold.</div>
+  {demo_disclosure_html}
   {run_meta_html}
   <div class="meta">
     <strong>Page Updated:</strong> {html.escape(page_generated_at)} |
@@ -4468,7 +4495,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
     {promoted_entry_block_table}
   </div>
   <div class="panel" style="margin-top:16px;">
-    <h2>Live Performance</h2>
+    <h2>{html.escape(live_performance_heading)}</h2>
     {_table(["Metric", "Value"], live_summary_rows)}
   </div>
   <div class="panel" style="margin-top:16px;">

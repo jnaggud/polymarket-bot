@@ -11,9 +11,15 @@ The project is designed around a simple rule: modeled edge is not the same as ex
 results, queue-aware paper fills, observed rebates, and wallet-reconciled results are tracked separately so an
 optimistic simulation cannot silently qualify a strategy for live trading.
 
-![Polymarket latency operations dashboard](docs/assets/latency-ops-dashboard.png)
+![Polymarket latency operations dashboard walkthrough](docs/assets/latency-ops-walkthrough.gif)
 
-_Dashboard shown with an isolated showcase ledger; figures are not live-performance claims._
+_Twelve-second dashboard walkthrough. The interface is shown in paper/dry-run mode; displayed figures are not
+live-performance claims. [Download the MP4 version](docs/assets/latency-ops-walkthrough.mp4)._
+
+> [!NOTE]
+> **Current evidence status:** this release makes no claim of profitable live trading. Screenshots, walkthroughs,
+> and the credential-free demo are software demonstrations. Simulated and paper results stay labeled by execution
+> tier, and live-pilot eligibility remains false until every configured validation and reconciliation gate passes.
 
 > [!IMPORTANT]
 > This repository is research software, not financial advice. Live trading is disabled by default. Eligibility,
@@ -62,7 +68,8 @@ The repository contains two related workflows:
    simulates maker/taker execution, and records every decision in an auditable event ledger.
 
 See [Architecture](docs/architecture.md) for component boundaries and data flow, and the
-[engineering case study](docs/portfolio-case-study.md) for the design decisions behind the project.
+[engineering case study](docs/portfolio-case-study.md) for the design decisions behind the project. The
+[performance-evidence policy](docs/performance-evidence.md) defines which claims each result tier can support.
 
 ## Quick start
 
@@ -128,6 +135,9 @@ python3 main.py latency-bot-validate \
   --input demo/runtime/validation_records.json \
   --output reports/demo-validation.json
 ```
+
+The deterministic demo is intentionally not presented as discovered alpha. It exists to make reporting, failed
+gates, and operational behavior reproducible without credentials or live orders.
 
 ## Core workflows
 
@@ -206,7 +216,7 @@ python3 -W error::DeprecationWarning -W error::ResourceWarning -m unittest disco
 python3 main.py --help >/dev/null
 ```
 
-The current suite contains 151 tests covering accounting, discovery, execution models, position lifecycles, risk
+The current suite contains 152 tests covering accounting, discovery, execution models, position lifecycles, risk
 gates, strategy epochs, live-pilot preflight, dashboard rendering, retention safety, demo generation, and validation.
 
 ## Database operations

@@ -65,7 +65,7 @@ documented command sequence.
 
 ## Verification
 
-- 151 deterministic tests cover research accounting, strategy selection, market lifecycles, execution models, live
+- 152 deterministic tests cover research accounting, strategy selection, market lifecycles, execution models, live
   preflight, validation gates, retention safety, demo generation, and dashboard rendering.
 - CI runs lint, command-line smoke checks, and the test suite on Python 3.10–3.13.
 - Tests treat deprecation and resource warnings as errors.
@@ -75,4 +75,6 @@ documented command sequence.
 
 The result is an inspectable, paper-first research platform that demonstrates Python systems design, event-driven
 accounting, SQLite data modeling, trading-risk controls, API integration, test engineering, and operational UI work.
-It is intentionally not presented as evidence of guaranteed profitability.
+It is intentionally not presented as evidence of live profitability. The deterministic showcase dataset validates
+the reporting path, not a trading edge; live-pilot eligibility remains false whenever calibration, reconciliation,
+sample-size, or risk gates fail.
