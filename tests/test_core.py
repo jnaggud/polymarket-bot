@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1677,7 +1678,7 @@ class KellySizeTest(unittest.TestCase):
             from bot.core import _append_intraday_registry_raw_updown
 
             _append_intraday_registry_raw_updown(settings, market, source="gamma", event_type="refresh")
-            with sqlite3.connect(settings.intraday_registry_audit_sqlite_path) as conn:
+            with closing(sqlite3.connect(settings.intraday_registry_audit_sqlite_path)) as conn, conn:
                 row = conn.execute(
                     "SELECT first_seen_source FROM market_lifecycle WHERE market_id = ?",
                     ("eth-gamma-discovery-1",),

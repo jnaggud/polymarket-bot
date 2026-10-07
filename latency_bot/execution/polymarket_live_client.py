@@ -45,7 +45,7 @@ class PolymarketLiveCompleteSetClient:
         except Exception as exc:
             return PolymarketLivePreflight(False, f"official CLOB V2 SDK unavailable: {exc}")
         try:
-            client = self._build_client()
+            self._build_client()
         except Exception as exc:
             return PolymarketLivePreflight(False, f"official CLOB V2 client init failed: {exc}")
         return PolymarketLivePreflight(True, "official CLOB V2 account client ready")
