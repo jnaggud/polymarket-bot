@@ -1608,41 +1608,45 @@ def append_shadow_variant_signals(settings: LatencyBotSettings, items: list[dict
             side = str(item.get("side") or "")
             side_fair = float(item.get("fair_no") or 0.0) if side.upper() == "NO" else float(item.get("fair_yes") or 0.0)
             eligible = 1 if bool(item.get("eligible")) else 0
-            conn.execute(
-                """
-                INSERT INTO shadow_variant_signals (
-                    ts, variant_id, market_id, asset, side, tenor_minutes, signal_type, edge, mode,
-                    fair_yes, fair_no, yes_bid, yes_ask, no_bid, no_ask,
-                    min_depth_usdc, book_age_ms, seconds_left, reference_price, volatility,
-                    reason, eligible, blocked_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ts,
-                    variant_id,
-                    str(item.get("market_id") or ""),
-                    str(item.get("asset") or ""),
-                    side,
-                    int(item.get("tenor_minutes") or 0),
-                    str(item.get("signal_type") or "SHADOW_VARIANT_SKIP"),
-                    edge,
-                    str(item.get("mode") or "shadow_variant"),
-                    float(item.get("fair_yes") or 0.0),
-                    float(item.get("fair_no") or 0.0),
-                    float(item.get("yes_bid") or 0.0),
-                    float(item.get("yes_ask") or 0.0),
-                    float(item.get("no_bid") or 0.0),
-                    float(item.get("no_ask") or 0.0),
-                    float(item.get("min_depth_usdc") or 0.0),
-                    float(item.get("book_age_ms") or 0.0),
-                    float(item.get("seconds_left") or 0.0),
-                    float(item.get("reference_price") or 0.0),
-                    float(item.get("volatility") or 0.0),
-                    reason,
-                    eligible,
-                    str(item.get("blocked_reason") or ""),
-                ),
-            )
+            # Aggregate tables preserve the complete experiment grid. Full raw
+            # rows are retained only for actionable candidates; persisting every
+            # ineligible combination produced millions of redundant rows/day.
+            if eligible:
+                conn.execute(
+                    """
+                    INSERT INTO shadow_variant_signals (
+                        ts, variant_id, market_id, asset, side, tenor_minutes, signal_type, edge, mode,
+                        fair_yes, fair_no, yes_bid, yes_ask, no_bid, no_ask,
+                        min_depth_usdc, book_age_ms, seconds_left, reference_price, volatility,
+                        reason, eligible, blocked_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ts,
+                        variant_id,
+                        str(item.get("market_id") or ""),
+                        str(item.get("asset") or ""),
+                        side,
+                        int(item.get("tenor_minutes") or 0),
+                        str(item.get("signal_type") or "SHADOW_VARIANT_SKIP"),
+                        edge,
+                        str(item.get("mode") or "shadow_variant"),
+                        float(item.get("fair_yes") or 0.0),
+                        float(item.get("fair_no") or 0.0),
+                        float(item.get("yes_bid") or 0.0),
+                        float(item.get("yes_ask") or 0.0),
+                        float(item.get("no_bid") or 0.0),
+                        float(item.get("no_ask") or 0.0),
+                        float(item.get("min_depth_usdc") or 0.0),
+                        float(item.get("book_age_ms") or 0.0),
+                        float(item.get("seconds_left") or 0.0),
+                        float(item.get("reference_price") or 0.0),
+                        float(item.get("volatility") or 0.0),
+                        reason,
+                        eligible,
+                        str(item.get("blocked_reason") or ""),
+                    ),
+                )
             conn.execute(
                 """
                 INSERT INTO shadow_variant_signal_summary (variant_id, signals, eligible)
