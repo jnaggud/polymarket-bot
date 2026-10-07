@@ -16,6 +16,7 @@ from latency_bot.maintenance import (
     database_inventory,
     retention_plan,
 )
+from latency_bot.storage import append_shadow_variant_signals
 from latency_bot.validation import build_validation_report, load_validation_records
 
 
@@ -119,6 +120,42 @@ class OperationsToolingTest(unittest.TestCase):
         inventory = database_inventory(self.settings.db_path)
         self.assertEqual(inventory["schema_version"], 2)
         self.assertGreater(inventory["file_bytes"], 0)
+
+    def test_variant_grid_summarizes_rejections_without_raw_row_growth(self) -> None:
+        items = [
+            {
+                "variant_id": "demo-rejected",
+                "market_id": "demo-market",
+                "asset": "btc",
+                "side": "YES",
+                "tenor_minutes": 5,
+                "reason": "edge below threshold",
+                "eligible": False,
+                "edge": 0.01,
+                "fair_yes": 0.51,
+            },
+            {
+                "variant_id": "demo-eligible",
+                "market_id": "demo-market",
+                "asset": "btc",
+                "side": "YES",
+                "tenor_minutes": 5,
+                "reason": "eligible",
+                "eligible": True,
+                "edge": 0.08,
+                "fair_yes": 0.62,
+            },
+        ]
+        append_shadow_variant_signals(self.settings, items, ts=self.anchor.isoformat().replace("+00:00", "Z"))
+        with closing(sqlite3.connect(self.settings.db_path)) as connection:
+            raw_rows = connection.execute(
+                "SELECT variant_id FROM shadow_variant_signals WHERE variant_id LIKE 'demo-%'"
+            ).fetchall()
+            summaries = connection.execute(
+                "SELECT variant_id, signals, eligible FROM shadow_variant_signal_summary WHERE variant_id LIKE 'demo-%' ORDER BY variant_id"
+            ).fetchall()
+        self.assertEqual(raw_rows, [("demo-eligible",)])
+        self.assertEqual(summaries, [("demo-eligible", 1, 1), ("demo-rejected", 1, 0)])
 
 
 if __name__ == "__main__":

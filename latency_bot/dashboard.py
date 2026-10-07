@@ -2048,7 +2048,7 @@ def render_latency_bot_dashboard_html(state: dict[str, Any]) -> str:
         ["Binance Ticks (60m)", html.escape(_fmt_num(recent_counts.get("binance_ticks", 0)))],
         ["Fills (60m)", html.escape(_fmt_num(recent_counts.get("fills", 0)))],
         ["Shadow Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_signals", 0)))],
-        ["Shadow Variant Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_variant_signals", 0)))],
+        ["Eligible Shadow Variant Signals (60m)", html.escape(_fmt_num(recent_counts.get("shadow_variant_signals", 0)))],
         ["CEX Latency Paper Signals (60m)", html.escape(_fmt_num(recent_counts.get("cex_latency_paper_signals", 0)))],
         ["Temporal Inventory Events (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_events", 0)))],
         ["Temporal Inventory Quotes (60m)", html.escape(_fmt_num(recent_counts.get("temporal_inventory_quotes", 0)))],

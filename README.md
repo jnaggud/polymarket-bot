@@ -231,6 +231,9 @@ Applying retention does not shrink the SQLite file immediately; schedule `--vacu
 maintenance window after verifying the compressed archives. SQLite needs temporary free space roughly equal to the
 database size; the command refuses to start when the volume does not have a 10% safety margin.
 
+The full shadow-variant grid is stored in compact aggregate tables. Only eligible variant candidates retain raw
+feature rows, preventing rejected combinations from creating millions of redundant records per day.
+
 ## Project layout
 
 ```text
