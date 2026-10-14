@@ -28,7 +28,7 @@ polymarket-bot = "bot.core:main"
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.16.10,<1",
+    "ruff>=0.17.0,<1",
 ]
 
 [project.urls]
